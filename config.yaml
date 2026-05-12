@@ -1,0 +1,51 @@
+recap:
+  schedule:
+    enabled: true
+    cron: "0 23 * * *"
+    timezone: "Asia/Shanghai"
+  llm:
+    default: "nvidia"
+    providers:
+      nvidia:
+        api_base: "https://integrate.api.nvidia.com/v1"
+        api_key: "YOUR_NVIDIA_API_KEY"
+        model: "deepseek-ai/deepseek-v4-flash"
+        max_tokens: 2000
+      nvidia-glm:
+        api_base: "https://integrate.api.nvidia.com/v1"
+        api_key: "YOUR_NVIDIA_API_KEY"
+        model: "z-ai/glm-5.1"
+        max_tokens: 2000
+      ollama:
+        api_base: "http://YOUR_OLLAMA_HOST:11434/v1"
+        api_key: "ollama"
+        model: "qwen3:8b"
+        max_tokens: 2000
+  memory:
+    auto_write: false
+    max_entries_per_day: 3
+    importance_filter: "high"
+  storage:
+    recap_dir: "~/.hermes/recaps"
+
+hermes:
+  home: "~/.hermes"
+  db:
+    host: "127.0.0.1"
+    port: 5432
+    database: "hermes_memory"
+    user: "hermes"
+    password: "your_db_password"
+    pool_size: 5
+  embedding:
+    api_base: "http://YOUR_OLLAMA_HOST:11434"
+    model: "bge-m3"
+    dimensions: 1024
+  iteration:
+    daily_cron: "59 23 * * *"
+    weekly_cron: "0 1 * * 0"
+    monthly_cron: "0 2 1 * *"
+  ingest:
+    max_sessions_per_request: 50
+    max_memories_per_request: 50
+    heartbeat_timeout: 300
