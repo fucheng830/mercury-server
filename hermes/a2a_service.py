@@ -20,16 +20,16 @@ logger = logging.getLogger(__name__)
 # ── Agent Card ─────────────────────────────────────────────────────────────
 
 def get_agent_card(base_url: str = "http://localhost:8788") -> Dict:
-    """Return the Hermes A2A Agent Card."""
+    """Return the Mercury A2A Agent Card."""
     return {
-        "name": "Hermes Memory Agent",
+        "name": "Mercury Memory Agent",
         "description": (
             "Cross-agent long-term memory middleware. "
             "Provides memory write, search, read, and share capabilities."
         ),
         "url": base_url.rstrip("/"),
         "version": "2.0.0",
-        "provider": {"name": "Hermes"},
+        "provider": {"name": "Mercury"},
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,
