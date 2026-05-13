@@ -43,6 +43,13 @@ def start_scheduler(provider, llm_service: LLMService):
             hour=int(daily_cron[1]), minute=int(daily_cron[0]),
             id="daily_ingestion", replace_existing=True,
         )
+        # DB-based recap (reads sessions table, not local files)
+        _scheduler.add_job(
+            _run_db_recap, "cron",
+            hour=0, minute=5,
+            args=[llm_service],
+            id="db_recap", replace_existing=True,
+        )
 
         weekly_cron = iter_config.get("weekly_cron", "0 1 * * 0").split()
         _scheduler.add_job(
@@ -88,6 +95,17 @@ def _run_daily_recap(provider, llm_service: LLMService):
             logger.info(f"Recap generated for {today}")
     except Exception as e:
         logger.error(f"Scheduled recap failed: {e}")
+
+
+def _run_db_recap(llm_service=None):
+    """Job: run server-side recap from sessions table (DB-based)."""
+    logger.info("Running DB-based server recap")
+    try:
+        from hermes.server_recap import run_server_recap
+        results = run_server_recap(llm_service=llm_service)
+        logger.info("DB recap stored %d memories", len(results))
+    except Exception as e:
+        logger.error("DB recap failed: %s", e)
 
 
 def _run_daily_ingestion():
