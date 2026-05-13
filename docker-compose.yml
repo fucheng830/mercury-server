@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  mercury-server:
+    build: .
+    container_name: mercury-server
+    ports:
+      - "8788:8788"
+    environment:
+      - MERCURY_DB_HOST=host.docker.internal
+      - MERCURY_DB_PORT=5432
+      - MERCURY_DB_NAME=hermes_memory
+      - MERCURY_DB_USER=hermes
+      - MERCURY_DB_PASSWORD=hermes
+      - MERCURY_EMBEDDING_URL=http://192.168.0.13:11434
+      - MERCURY_LLM_API_KEY=${MERCURY_LLM_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    volumes:
+      - mercury_recaps:/root/.hermes/recaps
+
+volumes:
+  mercury_recaps:

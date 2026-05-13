@@ -34,7 +34,44 @@ def _load_config() -> Dict[str, Any]:
     with open(source, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
-    return {**_default_config(), **data}
+    config = {**_default_config(), **data}
+    return _apply_env_overrides(config)
+
+
+def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Override config values from environment variables (Docker-friendly)."""
+    env_map = {
+        "MERCURY_DB_HOST": ("hermes", "db", "host"),
+        "MERCURY_DB_PORT": ("hermes", "db", "port", lambda v: int(v)),
+        "MERCURY_DB_NAME": ("hermes", "db", "database"),
+        "MERCURY_DB_USER": ("hermes", "db", "user"),
+        "MERCURY_DB_PASSWORD": ("hermes", "db", "password"),
+        "MERCURY_EMBEDDING_URL": ("hermes", "embedding", "api_base"),
+    }
+
+    for env_var, path in env_map.items():
+        val = os.environ.get(env_var)
+        if val is None:
+            continue
+        target = config
+        for key in path[:-1]:
+            target = target.setdefault(key, {})
+        last = path[-1]
+        if callable(last):
+            key, convert = path[-2], last
+            target = config
+            for k in path[:-2]:
+                target = target.setdefault(k, {})
+            target[key] = convert(val)
+        else:
+            target[last] = val
+
+    # Handle inline LLM API key (goes into recap.llm.providers.nvidia.api_key)
+    if os.environ.get("MERCURY_LLM_API_KEY"):
+        providers = config.setdefault("recap", {}).setdefault("llm", {}).setdefault("providers", {})
+        providers.setdefault("nvidia", {})["api_key"] = os.environ["MERCURY_LLM_API_KEY"]
+
+    return config
 
 
 def _default_config() -> Dict[str, Any]:
