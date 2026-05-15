@@ -220,47 +220,52 @@ def memory_graph(
 @app.get("/api/memory/read")
 def memory_read(target: str = Query("all", pattern="^(memory|user|all)$")):
     try:
-        from hermes.bridge import read_memory
-        return read_memory(target)
+        from hermes.memory_service import read_memories
+        ns = "claude" if target == "memory" else ("user" if target == "user" else "claude")
+        results = read_memories(limit=50, namespace=ns)
+        return {"results": results, "target": target}
     except Exception as e:
-        raise HTTPException(503, f"Hermes bridge error: {str(e)}")
+        raise HTTPException(503, f"Memory read error: {str(e)}")
 
 
 @app.post("/api/memory/write")
 def memory_write(body: dict):
     try:
-        from hermes.bridge import write_memory
-        return write_memory(
-            body.get("target", "memory"),
-            body.get("action", "add"),
-            body.get("content", ""),
-            body.get("old_text", ""),
-        )
+        from hermes.memory_service import write_memory, delete_memory
+        target = body.get("target", "memory")
+        action = body.get("action", "add")
+        content = body.get("content", "")
+        old_text = body.get("old_text", "")
+        ns = "claude" if target == "memory" else "user"
+        if action == "replace" and old_text:
+            delete_memory(old_text, namespace=ns)
+        result = write_memory(content=content, namespace=ns, source="mcp")
+        return {"success": True, "id": result.get("id"), "layer": result.get("layer")}
     except Exception as e:
-        raise HTTPException(503, f"Hermes bridge error: {str(e)}")
+        raise HTTPException(503, f"Memory write error: {str(e)}")
 
 
 @app.post("/api/memory/search")
 def memory_search(body: dict):
     try:
-        from hermes.bridge import search_memory, recall_memory
+        from hermes.memory_service import search_memories
         query = body.get("query", "")
         limit = body.get("limit", 5)
-        mode = body.get("mode", "fts")
-        if mode == "semantic":
-            return {"results": recall_memory(query, limit)}
-        return {"results": search_memory(query, limit)}
+        results = search_memories(query, limit=limit)
+        return {"results": results}
     except Exception as e:
-        raise HTTPException(503, f"Hermes bridge error: {str(e)}")
+        raise HTTPException(503, f"Memory search error: {str(e)}")
 
 
 @app.delete("/api/memory/delete")
 def memory_delete(target: str = Query(...), substring: str = Query(...)):
     try:
-        from hermes.bridge import delete_memory
-        return delete_memory(target, substring)
+        from hermes.memory_service import delete_memory
+        ns = "claude" if target == "memory" else "user"
+        ok = delete_memory(substring, namespace=ns)
+        return {"success": ok}
     except Exception as e:
-        raise HTTPException(503, f"Hermes bridge error: {str(e)}")
+        raise HTTPException(503, f"Memory delete error: {str(e)}")
 
 
 # ── Recap Ingest API ─────────────────────────────────────────────────────────
