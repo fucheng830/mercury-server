@@ -418,6 +418,7 @@ def register_agent(
                 ON CONFLICT (agent_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
+                    auth_credentials = EXCLUDED.auth_credentials,
                     last_active = now()
                 RETURNING id, agent_id, name, namespace, created_at
                 """,
