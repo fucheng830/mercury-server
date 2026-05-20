@@ -1,6 +1,5 @@
 """PostgreSQL connection pool and query helpers for Hermes memory."""
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,7 +24,6 @@ def init_pool() -> None:
         return
 
     cfg = _get_db_config()
-    password = os.environ.get("HERMES_DB_PASSWORD", cfg.get("password", ""))
     _pool = pool.ThreadedConnectionPool(
         minconn=1,
         maxconn=cfg.get("pool_size", 5),
@@ -33,7 +31,7 @@ def init_pool() -> None:
         port=cfg.get("port", 5432),
         database=cfg.get("database", "hermes_memory"),
         user=cfg.get("user", "hermes"),
-        password=password,
+        password=cfg.get("password", ""),
     )
     logger.info("DB connection pool initialized")
 

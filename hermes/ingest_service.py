@@ -41,7 +41,14 @@ def ingest_sessions(client_id: str, sessions: List[Dict], sync_log: List[Dict]) 
         register_vector(conn)
         with conn.cursor() as cur:
             for s in sessions:
-                emb = np.array(s["embedding"], dtype=np.float32) if s.get("embedding") else None
+                emb = None
+                raw_emb = s.get("embedding")
+                if raw_emb:
+                    try:
+                        emb = np.array(raw_emb, dtype=np.float32)
+                    except (ValueError, TypeError):
+                        logger.warning("Skipping invalid embedding for session %s", s.get("session_id"))
+                        emb = None
                 cur.execute(
                     """
                     INSERT INTO sessions (client_id, project_id, session_id, project_path,

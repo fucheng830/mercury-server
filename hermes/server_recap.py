@@ -2,26 +2,28 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from hermes.db import execute, execute_one
+
+_CST = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
 
 
 def run_server_recap(date: str = "", llm_service=None):
     """Generate a daily recap from sessions in the database, write results as memories."""
-    date = date or datetime.now().strftime("%Y-%m-%d")
+    date = date or datetime.now(_CST).strftime("%Y-%m-%d")
     logger.info("Server recap for %s", date)
 
-    # Read today's sessions from the DB
+    # Read today's sessions from the DB (compare in CST timezone)
     rows = execute(
         """
         SELECT s.id, s.project_id, s.preview, s.message_count, s.first_ts, s.last_ts,
                s.project_path
         FROM sessions s
         WHERE s.last_ts IS NOT NULL
-          AND s.last_ts::date = %s::date
+          AND (s.last_ts AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = %s::date
         ORDER BY s.last_ts DESC
         LIMIT 200
         """,

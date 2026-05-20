@@ -302,6 +302,7 @@ def ingest_register(body: dict):
         from hermes.ingest_service import register_client
         return register_client(body.get("name", ""), body.get("hostname", ""), body.get("os_info", ""))
     except Exception as e:
+        import logging; logging.getLogger(__name__).exception("Register error")
         raise HTTPException(500, f"Register error: {str(e)}")
 
 
@@ -311,6 +312,7 @@ def ingest_sessions_route(body: dict):
         from hermes.ingest_service import ingest_sessions as _ingest
         return _ingest(body.get("client_id", ""), body.get("sessions", []), body.get("sync_log", []))
     except Exception as e:
+        import logging; logging.getLogger(__name__).exception("Session ingest error")
         raise HTTPException(500, f"Session ingest error: {str(e)}")
 
 
@@ -320,6 +322,7 @@ def ingest_episodic_memories(body: dict):
         from hermes.ingest_service import ingest_episodic
         return ingest_episodic(body.get("client_id", ""), body.get("memories", []), body.get("date", ""))
     except Exception as e:
+        import logging; logging.getLogger(__name__).exception("Episodic ingest error")
         raise HTTPException(500, f"Episodic ingest error: {str(e)}")
 
 
@@ -329,6 +332,7 @@ def ingest_heartbeat(body: dict):
         from hermes.ingest_service import heartbeat as _heartbeat
         return _heartbeat(body.get("client_id", ""))
     except Exception as e:
+        import logging; logging.getLogger(__name__).exception("Heartbeat error")
         raise HTTPException(500, f"Heartbeat error: {str(e)}")
 
 
