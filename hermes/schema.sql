@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_memories_layer ON memories(layer);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
 CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at) WHERE expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_fts ON memories USING gin(fts);
@@ -109,7 +108,6 @@ CREATE INDEX IF NOT EXISTS idx_sessions_embedding ON sessions USING hnsw (embedd
 
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS namespace VARCHAR(50) DEFAULT 'claude';
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
-CREATE INDEX IF NOT EXISTS idx_memories_ns_layer ON memories(namespace, layer);
 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS namespace VARCHAR(50) DEFAULT 'claude';
 

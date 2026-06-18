@@ -68,10 +68,9 @@ def execute(query: str, params: tuple = None, fetch: bool = False) -> Optional[L
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, params)
-            if fetch:
-                return [dict(row) for row in cur.fetchall()]
-            conn.commit()
-            return None
+            rows = [dict(row) for row in cur.fetchall()] if fetch else None
+        conn.commit()
+        return rows
     except Exception:
         conn.rollback()
         raise

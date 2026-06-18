@@ -532,7 +532,7 @@ def list_types(enabled_only: bool = False) -> List[Dict]:
 
 def upsert_type(name: str, label: str, color: Optional[str] = None,
                 sort_order: int = 0, enabled: bool = True) -> Optional[Dict]:
-    row = execute_one(
+    rows = execute(
         """
         INSERT INTO type_registry (name, label, color, sort_order, enabled)
         VALUES (%s, %s, %s, %s, %s)
@@ -544,8 +544,9 @@ def upsert_type(name: str, label: str, color: Optional[str] = None,
         RETURNING name, label, color, sort_order, enabled, created_at
         """,
         (name, label, color, sort_order, enabled),
+        fetch=True,
     )
-    return _serialize_memory(dict(row)) if row else None
+    return _serialize_memory(rows[0]) if rows else None
 
 
 def delete_type(name: str) -> bool:
@@ -575,7 +576,7 @@ def list_projects(namespace: Optional[str] = None) -> List[Dict]:
 
 def get_or_create_project(name: str, path: Optional[str] = None,
                           namespace: str = "claude") -> Dict:
-    row = execute_one(
+    rows = execute(
         """
         INSERT INTO projects (name, path, namespace)
         VALUES (%s, %s, %s)
@@ -583,8 +584,9 @@ def get_or_create_project(name: str, path: Optional[str] = None,
         RETURNING id, name, path, namespace, created_at, updated_at
         """,
         (name, path, namespace),
+        fetch=True,
     )
-    return _serialize_memory(dict(row)) if row else {}
+    return _serialize_memory(rows[0]) if rows else {}
 
 
 def delete_project(project_id: str) -> bool:
