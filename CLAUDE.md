@@ -25,10 +25,11 @@ server.py (FastAPI)
 │   ├── db.py           PostgreSQL 连接池
 │   ├── schema.sql      数据库表结构
 │   ├── memory_service.py  记忆 CRUD + namespace 隔离
+│   ├── memory_service.py  记忆 CRUD + namespace 隔离 + 多维筛选
 │   ├── a2a_service.py     A2A Agent Card + skill 路由
 │   ├── ingest_service.py  Client 数据接入
 │   ├── graph_service.py   实体/关系图谱
-│   ├── iteration.py      LLM 迭代压缩引擎
+│   ├── iteration.py      observation→candidate LLM 提炼引擎
 │   └── embedding.py     bge-m3 向量嵌入
 ├── providers/          Claude/Codex 数据源适配
 └── recap/              LLM 复盘生成引擎
@@ -36,9 +37,14 @@ server.py (FastAPI)
 
 ## 数据模型
 
+记忆模型 v2：`observation → candidate → memory` 工作流 + `type/scope/status/project` 维度。
+设计文档：`docs/superpowers/specs/2026-06-18-memory-model-v2-design.md`
+
 | 表 | 说明 |
 |------|------|
-| `memories` | 三层记忆（episodic/semantic/core）+ namespace 隔离 |
+| `memories` | 记忆（stage: observation/candidate/memory + type/scope/status/project_id）+ namespace 隔离 |
+| `type_registry` | 可扩展记忆类型枚举（NOTE/DISCOVERY/ARCH/DECISION/BUGFIX/PREFERENCE/...） |
+| `projects` | 项目（id/name/path/namespace），memory 可关联 |
 | `sessions` | Claude Code 会话元数据 + 向量 |
 | `entities` / `relations` | 知识图谱 |
 | `clients` | 注册的同步客户端 |

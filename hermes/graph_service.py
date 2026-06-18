@@ -355,7 +355,7 @@ def get_entity_memories(entity_name: str) -> List[Dict]:
     """
     rows = execute(
         """
-        SELECT m.id, m.layer, m.content, m.summary, m.source, m.importance,
+        SELECT m.id, m.stage, m.content, m.summary, m.source, m.importance,
                m.tags, m.embedding, m.recall_count, m.created_at, m.expires_at, m.updated_at
         FROM memories m
         JOIN memory_entities me ON m.id = me.memory_id

@@ -44,8 +44,8 @@ def get_agent_card(base_url: str = "http://localhost:8788") -> Dict:
                 "id": "memory.write",
                 "name": "Write Memory",
                 "description": (
-                    "Store a memory with layer (episodic/semantic/core), "
-                    "importance (1-5), and optional tags."
+                    "Store a memory with stage (observation/candidate/memory), "
+                    "importance (1-5), type, and optional tags."
                 ),
                 "inputModes": ["text"],
                 "outputModes": ["text"],
@@ -63,7 +63,7 @@ def get_agent_card(base_url: str = "http://localhost:8788") -> Dict:
             {
                 "id": "memory.read",
                 "name": "Read Memories",
-                "description": "Paginated read of memories, filterable by layer.",
+                "description": "Paginated read of memories, filterable by stage.",
                 "inputModes": ["text"],
                 "outputModes": ["text"],
             },
@@ -191,15 +191,17 @@ def _handle_write(agent_id: str, params: Dict) -> Dict:
 
     memory = write_memory(
         content=content,
-        layer=params.get("layer", "episodic"),
+        stage=params.get("stage", "observation"),
         source="a2a",
         importance=params.get("importance", 3),
+        type=params.get("type", "NOTE"),
+        scope=params.get("scope", "global"),
         tags=params.get("tags", []),
         summary=params.get("summary"),
         auto_embed=params.get("auto_embed", True),
         namespace=agent_id,
     )
-    return _ok({"memory_id": memory.get("id"), "layer": memory.get("layer")})
+    return _ok({"memory_id": memory.get("id"), "stage": memory.get("stage"), "type": memory.get("type")})
 
 
 def _handle_search(agent_id: str, params: Dict) -> Dict:
@@ -210,7 +212,7 @@ def _handle_search(agent_id: str, params: Dict) -> Dict:
     namespaces = [agent_id, "shared"]
     results = search_memories(
         query_text=query,
-        layer=params.get("layer"),
+        stage=params.get("stage"),
         limit=params.get("limit", 20),
         namespaces=namespaces,
     )
@@ -219,7 +221,7 @@ def _handle_search(agent_id: str, params: Dict) -> Dict:
 
 def _handle_read(agent_id: str, params: Dict) -> Dict:
     memories = read_memories(
-        layer=params.get("layer"),
+        stage=params.get("stage"),
         limit=params.get("limit", 50),
         offset=params.get("offset", 0),
         namespace=agent_id,

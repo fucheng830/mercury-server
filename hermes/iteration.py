@@ -1,10 +1,17 @@
-"""Self-iteration engine with daily/weekly/monthly scheduled jobs."""
+"""Self-iteration engine with daily/weekly/monthly scheduled jobs.
+
+Memory model v2 pipeline:
+  session -> observation (daily ingest)
+  observation -> candidate (LLM distillation, pre-fills type)
+  candidate -> memory (human confirm; weekly auto_promote for high-confidence)
+See docs/superpowers/specs/2026-06-18-memory-model-v2-design.md
+"""
 import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from recap_config import get_llm_config, get_storage_config
 from recap.llm_service import LLMService
@@ -15,61 +22,35 @@ logger = logging.getLogger(__name__)
 # System prompts (Chinese)
 # ---------------------------------------------------------------------------
 
-DEDUP_SYSTEM_PROMPT = """你是一个记忆去重与压缩引擎。你的任务是分析近期的情景记忆（episodic memories），进行去重和合并。
+DEDUP_SYSTEM_PROMPT = """你是一个记忆提炼引擎。你的任务是分析近期的观察记忆（observations），进行去重、合并与提炼，产出候选记忆（candidates）等待人工确认。
 
 对于每一组合并后的记忆，请：
 1. 生成一个简洁的摘要（summary）
 2. 评估重要性（1-5，5最重要）
 3. 提取 2-5 个标签（tags）
-4. 记录合并了多少条原始记忆（source_count）
+4. 判断类型 type（NOTE/DISCOVERY/ARCH/DECISION/BUGFIX/PREFERENCE 之一）
+5. 记录合并了多少条原始记忆（source_count）
 
 请严格按照以下 JSON 格式输出：
 {
   "processed": [
     {
-      "content": "合并后的完整内容",
+      "content": "提炼后的完整内容",
       "summary": "简洁摘要",
       "importance": 4,
       "tags": ["tag1", "tag2"],
+      "type": "DECISION",
       "source_count": 3
     }
   ]
 }
 
 注意：
-- 内容相似或相关的记忆应该合并
+- 内容相似或相关的观察应该合并
 - 保留所有重要细节，不要丢失关键信息
+- type 取值：NOTE=笔记、DISCOVERY=发现、ARCH=架构、DECISION=决策、BUGFIX=修复、PREFERENCE=偏好
 - importance 评估标准：1=琐碎，2=一般，3=有用，4=重要，5=关键
-- 如果所有记忆都是独立的，每条单独输出即可"""
-
-CORE_REVIEW_SYSTEM_PROMPT = """你是一个核心记忆审查引擎。你的任务是审查语义记忆（semantic memories），判断哪些应该晋升为核心记忆（core）。
-
-晋升标准：
-- 用户偏好和习惯
-- 架构决策和技术选型
-- 工具配置和使用方式
-- 错误解决方案和踩坑经验
-- 反复出现的模式
-
-请严格按照以下 JSON 格式输出：
-{
-  "promoted": [
-    {
-      "content": "核心记忆内容",
-      "summary": "简洁摘要",
-      "importance": 5,
-      "tags": ["tag1", "tag2"],
-      "original_ids": ["id1", "id2"]
-    }
-  ]
-}
-
-注意：
-- 只选择真正值得长期保留的记忆
-- 合并内容重复或高度相关的条目
-- importance 应该是 4 或 5
-- 如果没有值得晋升的，返回空数组
-- 已有的核心记忆如下供参考去重"""
+- 如果所有观察都是独立的，每条单独输出即可"""
 
 ENTITY_EXTRACT_SYSTEM_PROMPT = """你是一个实体和关系提取引擎。你的任务是从知识条目中提取实体和关系。
 
@@ -101,17 +82,16 @@ ENTITY_EXTRACT_SYSTEM_PROMPT = """你是一个实体和关系提取引擎。你�
 
 
 # ---------------------------------------------------------------------------
-# Helper: fetch episodic memories from last N days
+# Helper: fetch memories from a stage within last N days
 # ---------------------------------------------------------------------------
 
-def _fetch_recent_memories(layer: str, days: int, limit: int = 50) -> List[Dict]:
-    """Fetch memories from a specific layer within the last N days."""
+def _fetch_recent_memories(stage: str, days: int, limit: int = 50) -> List[Dict]:
+    """Fetch memories from a specific stage within the last N days."""
     from hermes.memory_service import read_memories
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    all_mems = read_memories(layer=layer, limit=limit)
+    all_mems = read_memories(stage=stage, limit=limit)
 
-    # Filter by created_at
     result = []
     for m in all_mems:
         created_str = m.get("created_at")
@@ -129,18 +109,17 @@ def _fetch_recent_memories(layer: str, days: int, limit: int = 50) -> List[Dict]
 # ---------------------------------------------------------------------------
 
 def run_daily_ingestion(date: str = None) -> Dict[str, Any]:
-    """Run daily ingestion job: load recap, write memories, compress, promote.
+    """Run daily ingestion job: load recap, write observations, distill, promote.
 
     Args:
         date: Date string (YYYY-MM-DD). Defaults to today.
 
     Returns:
-        Dict with status, date, ingested count, compressed count, promoted count.
+        Dict with status, date, ingested / distilled / promoted counts.
     """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
 
-    # Load recap file
     config = get_storage_config()
     recap_dir = Path(os.path.expanduser(config.get("recap_dir", "~/.hermes/recaps")))
     recap_file = recap_dir / f"{date}.json"
@@ -148,11 +127,10 @@ def run_daily_ingestion(date: str = None) -> Dict[str, Any]:
     if not recap_file.exists():
         logger.info("No recap file found for %s", date)
         return {"status": "no_recap", "date": date, "ingested": 0,
-                "compressed_to_semantic": 0, "promoted_to_core": 0}
+                "distilled_to_candidate": 0, "promoted_to_memory": 0}
 
     recap_data = json.loads(recap_file.read_text(encoding="utf-8"))
 
-    # Extract knowledge_gained items
     importance_map = {"high": 4, "medium": 3, "low": 2}
     ingested = 0
 
@@ -162,7 +140,7 @@ def run_daily_ingestion(date: str = None) -> Dict[str, Any]:
 
         _write_memory_safe(
             content=item.get("content", ""),
-            layer="episodic",
+            stage="observation",
             source="recap",
             importance=numeric_importance,
             tags=item.get("tags", []),
@@ -170,11 +148,10 @@ def run_daily_ingestion(date: str = None) -> Dict[str, Any]:
         )
         ingested += 1
 
-    # Extract key_decisions as high-importance memories
     for decision in recap_data.get("key_decisions", []):
         _write_memory_safe(
             content=decision if isinstance(decision, str) else str(decision),
-            layer="episodic",
+            stage="observation",
             source="recap",
             importance=4,
             tags=["decision"],
@@ -182,21 +159,18 @@ def run_daily_ingestion(date: str = None) -> Dict[str, Any]:
         )
         ingested += 1
 
-    # Compress episodic to semantic
-    compressed = _compress_episodic_to_semantic()
-
-    # Auto-promote qualified semantic to core
+    distilled = _distill_observation_to_candidate()
     promoted = _auto_promote_safe()
 
-    logger.info("Daily ingestion for %s: ingested=%d, compressed=%d, promoted=%d",
-                date, ingested, compressed, promoted)
+    logger.info("Daily ingestion for %s: ingested=%d, distilled=%d, promoted=%d",
+                date, ingested, distilled, promoted)
 
     return {
         "status": "ok",
         "date": date,
         "ingested": ingested,
-        "compressed_to_semantic": compressed,
-        "promoted_to_core": promoted,
+        "distilled_to_candidate": distilled,
+        "promoted_to_memory": promoted,
     }
 
 
@@ -210,7 +184,7 @@ def _write_memory_safe(**kwargs) -> None:
 
 
 def _auto_promote_safe() -> int:
-    """Run auto_promote with error handling."""
+    """Run auto_promote (high-confidence candidate -> memory) with error handling."""
     try:
         from hermes.memory_service import auto_promote
         return auto_promote()
@@ -220,36 +194,35 @@ def _auto_promote_safe() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Episodic → Semantic compression
+# observation -> candidate distillation
 # ---------------------------------------------------------------------------
 
-def _compress_episodic_to_semantic() -> int:
-    """Compress recent episodic memories into semantic memories via LLM.
+def _distill_observation_to_candidate() -> int:
+    """Distill recent observations into candidates via LLM (pre-fills type).
 
     Returns:
-        Number of compressed items written as semantic memories.
+        Number of distilled items written as candidate memories.
     """
     try:
-        episodic = _fetch_recent_memories("episodic", days=7, limit=50)
+        observations = _fetch_recent_memories("observation", days=7, limit=50)
     except Exception:
-        episodic = []
+        observations = []
 
-    if not episodic:
+    if not observations:
         return 0
 
-    # Build user prompt with episodic memories
     memories_text = "\n".join(
         f"[{m.get('id', '?')}] (importance={m.get('importance', 3)}): {m.get('content', '')}"
-        for m in episodic
+        for m in observations
     )
 
-    user_prompt = f"请分析以下 {len(episodic)} 条情景记忆，进行去重和合并：\n\n{memories_text}"
+    user_prompt = f"请分析以下 {len(observations)} 条观察记忆，进行去重、合并与提炼：\n\n{memories_text}"
 
     try:
         llm = LLMService(get_llm_config())
         result = llm.generate_json(DEDUP_SYSTEM_PROMPT, user_prompt, max_tokens=262144)
     except Exception as e:
-        logger.warning("LLM compression failed: %s", e)
+        logger.warning("LLM distillation failed: %s", e)
         return 0
 
     processed = result.get("processed", [])
@@ -259,8 +232,9 @@ def _compress_episodic_to_semantic() -> int:
             from hermes.memory_service import write_memory
             write_memory(
                 content=item.get("content", ""),
-                layer="semantic",
-                source="compression",
+                stage="candidate",
+                type=item.get("type", "NOTE"),
+                source="distillation",
                 importance=item.get("importance", 3),
                 tags=item.get("tags", []),
                 summary=item.get("summary"),
@@ -268,97 +242,25 @@ def _compress_episodic_to_semantic() -> int:
             )
             count += 1
         except Exception as e:
-            logger.warning("Failed to write compressed memory: %s", e)
+            logger.warning("Failed to write distilled candidate: %s", e)
 
     return count
 
 
 # ---------------------------------------------------------------------------
-# Weekly core review
+# Weekly auto-promotion (candidate -> memory, high-confidence bypass)
 # ---------------------------------------------------------------------------
 
 def run_weekly_core_review() -> Dict[str, Any]:
-    """Run weekly core review: promote high-importance semantic memories to core.
+    """Weekly job: auto-promote high-confidence candidates to memory.
 
-    Returns:
-        Dict with status and promoted count.
+    Per design Q2, candidate->memory is a human confirmation gate; this job is
+    the optional high-confidence bypass (importance>=5 or recall>=5) handled by
+    memory_service.auto_promote.
     """
-    try:
-        semantic = _fetch_high_importance_semantic(limit=50)
-    except Exception:
-        semantic = []
-
-    if not semantic:
-        logger.info("No high-importance semantic memories to review")
-        return {"status": "ok", "promoted": 0}
-
-    # Fetch existing core for dedup context
-    try:
-        from hermes.memory_service import read_memories
-        core = read_memories(layer="core", limit=50)
-    except Exception:
-        core = []
-
-    # Build prompt
-    semantic_text = "\n".join(
-        f"[{m.get('id', '?')}] (importance={m.get('importance', 3)}): {m.get('content', '')}"
-        for m in semantic
-    )
-
-    core_text = ""
-    if core:
-        core_text = "\n\n已有核心记忆（供去重参考）：\n" + "\n".join(
-            f"- {m.get('content', '')[:100]}" for m in core
-        )
-
-    user_prompt = f"请审查以下 {len(semantic)} 条高重要性语义记忆，判断哪些应晋升为核心记忆：\n\n{semantic_text}{core_text}"
-
-    try:
-        llm = LLMService(get_llm_config())
-        result = llm.generate_json(CORE_REVIEW_SYSTEM_PROMPT, user_prompt, max_tokens=262144)
-    except Exception as e:
-        logger.warning("LLM core review failed: %s", e)
-        return {"status": "error", "promoted": 0}
-
-    promoted_items = result.get("promoted", [])
-    count = 0
-    for item in promoted_items:
-        try:
-            from hermes.memory_service import write_memory
-            write_memory(
-                content=item.get("content", ""),
-                layer="core",
-                source="core_review",
-                importance=item.get("importance", 5),
-                tags=item.get("tags", []),
-                summary=item.get("summary"),
-                auto_embed=True,
-            )
-            count += 1
-        except Exception as e:
-            logger.warning("Failed to write core memory: %s", e)
-
-    logger.info("Weekly core review: promoted %d memories", count)
-    return {"status": "ok", "promoted": count}
-
-
-def _fetch_high_importance_semantic(limit: int = 50) -> List[Dict]:
-    """Fetch semantic memories with importance >= 4."""
-    from hermes.db import execute
-    rows = execute(
-        """
-        SELECT id, layer, content, summary, source, importance, tags,
-               recall_count, created_at, expires_at, updated_at
-        FROM memories
-        WHERE layer = 'semantic' AND importance >= 4
-        ORDER BY created_at DESC
-        LIMIT %s
-        """,
-        (limit,),
-        fetch=True,
-    )
-    from hermes.memory_service import _serialize_memory
-    return [_serialize_memory(r) for r in (rows or [])]
+    promoted = _auto_promote_safe()
+    logger.info("Weekly auto-promote: promoted %d candidates to memory", promoted)
+    return {"status": "ok", "promoted": promoted}
 
 
 # ---------------------------------------------------------------------------
@@ -371,11 +273,9 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
     Returns:
         Dict with status, entity count, relation count, expired cleaned count.
     """
-    # Fetch recent memories (all layers)
     try:
         from hermes.memory_service import read_memories
         memories = read_memories(limit=50)
-        # Filter to last 30 days
         cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         memories = [
             m for m in memories
@@ -392,7 +292,6 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
     relations_created = 0
 
     if memories:
-        # Build prompt with memory content
         memories_text = "\n".join(
             f"[{m.get('id', '?')}] {m.get('content', '')}"
             for m in memories
@@ -407,7 +306,6 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
             logger.warning("LLM entity extraction failed: %s", e)
             result = {}
 
-        # Upsert entities
         from hermes.graph_service import upsert_entity, add_relation, link_memory_entity
 
         for entity in result.get("entities", []):
@@ -422,7 +320,6 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
             except Exception as e:
                 logger.warning("Failed to upsert entity: %s", e)
 
-        # Add relations
         for rel in result.get("relations", []):
             try:
                 add_relation(
@@ -434,7 +331,6 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
             except Exception as e:
                 logger.warning("Failed to add relation: %s", e)
 
-        # Link memories to entities by name matching
         for m in memories:
             content_lower = m.get("content", "").lower()
             for entity in result.get("entities", []):
@@ -445,7 +341,6 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
                     except Exception as e:
                         logger.debug("Failed to link memory to entity: %s", e)
 
-    # Cleanup expired
     try:
         from hermes.memory_service import cleanup_expired
         expired = cleanup_expired()

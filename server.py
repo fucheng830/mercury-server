@@ -200,13 +200,20 @@ def get_subagent_conversation(project_id: str, session_id: str, agent_file: str)
 
 @app.post("/api/memory/query")
 def memory_query(body: dict):
-    """Hybrid search across memories."""
+    """Hybrid search across memories (RRF), with multi-dimension filters."""
     try:
         from hermes.memory_service import search_memories
         query = body.get("query", "")
-        layer = body.get("layer") or None
-        limit = body.get("limit", 20)
-        results = search_memories(query, layer=layer, limit=limit)
+        results = search_memories(
+            query,
+            stage=body.get("stage"),
+            types=body.get("types"),
+            scopes=body.get("scopes"),
+            statuses=body.get("statuses"),
+            project_id=body.get("project_id"),
+            limit=body.get("limit", 20),
+            offset=body.get("offset", 0),
+        )
         return {"results": results}
     except Exception as e:
         raise HTTPException(503, f"Memory search error: {str(e)}")
@@ -222,21 +229,21 @@ def memory_stats():
 
 
 @app.get("/api/memory/recent")
-def memory_recent(limit: int = Query(20, ge=1, le=100), layer: Optional[str] = Query(None)):
+def memory_recent(limit: int = Query(20, ge=1, le=100), stage: Optional[str] = Query(None)):
     try:
         from hermes.db import execute
-        if layer:
+        if stage:
             rows = execute(
-                "SELECT id, content, summary, layer, source, importance, tags, "
-                "recall_count, created_at "
-                "FROM memories WHERE layer = %s ORDER BY created_at DESC LIMIT %s",
-                (layer, limit),
+                "SELECT id, stage, type, scope, status, project_id, content, summary, source, "
+                "importance, tags, recall_count, created_at, updated_at "
+                "FROM memories WHERE stage = %s ORDER BY created_at DESC LIMIT %s",
+                (stage, limit),
                 fetch=True,
             )
         else:
             rows = execute(
-                "SELECT id, content, summary, layer, source, importance, tags, "
-                "recall_count, created_at "
+                "SELECT id, stage, type, scope, status, project_id, content, summary, source, "
+                "importance, tags, recall_count, created_at, updated_at "
                 "FROM memories ORDER BY created_at DESC LIMIT %s",
                 (limit,),
                 fetch=True,
@@ -244,6 +251,97 @@ def memory_recent(limit: int = Query(20, ge=1, le=100), layer: Optional[str] = Q
         return rows or []
     except Exception as e:
         raise HTTPException(503, f"Memory recent error: {str(e)}")
+
+
+@app.get("/api/memory/list")
+def memory_list(
+    stage: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    scopes: Optional[str] = Query(None),
+    statuses: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    namespace: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort: str = Query("updated_at"),
+    order: str = Query("desc"),
+    page: int = Query(1, ge=1),
+    size: int = Query(25, ge=1, le=200),
+):
+    """Multi-filter paginated list for the 'All memories' view."""
+    try:
+        from hermes.memory_service import list_memories
+
+        def _split(v: Optional[str]):
+            return [x.strip() for x in v.split(",") if x.strip()] if v else None
+
+        return list_memories(
+            stage=stage,
+            types=_split(types),
+            scopes=_split(scopes),
+            statuses=_split(statuses),
+            project_id=project_id,
+            namespaces=_split(namespace),
+            search=search,
+            sort=sort,
+            order=order,
+            page=page,
+            size=size,
+        )
+    except Exception as e:
+        raise HTTPException(503, f"Memory list error: {str(e)}")
+
+
+@app.get("/api/memory/candidates")
+def memory_candidates(
+    page: int = Query(1, ge=1),
+    size: int = Query(25, ge=1, le=200),
+):
+    """Candidate review queue (stage=candidate)."""
+    try:
+        from hermes.memory_service import list_memories
+        return list_memories(stage="candidate", page=page, size=size)
+    except Exception as e:
+        raise HTTPException(503, f"Candidates error: {str(e)}")
+
+
+@app.get("/api/memory/observations")
+def memory_observations(
+    page: int = Query(1, ge=1),
+    size: int = Query(25, ge=1, le=200),
+):
+    """Raw observations (stage=observation)."""
+    try:
+        from hermes.memory_service import list_memories
+        return list_memories(stage="observation", page=page, size=size)
+    except Exception as e:
+        raise HTTPException(503, f"Observations error: {str(e)}")
+
+
+@app.post("/api/memory/{memory_id}/confirm")
+def memory_confirm(memory_id: str, body: dict = None):
+    """Human confirmation gate: candidate -> memory (may override type/scope/project)."""
+    try:
+        from hermes.memory_service import confirm_candidate
+        body = body or {}
+        ok = confirm_candidate(
+            memory_id,
+            type=body.get("type"),
+            scope=body.get("scope"),
+            project_id=body.get("project_id"),
+        )
+        return {"success": ok}
+    except Exception as e:
+        raise HTTPException(503, f"Confirm error: {str(e)}")
+
+
+@app.post("/api/memory/{memory_id}/reject")
+def memory_reject(memory_id: str):
+    """Reject a candidate: status -> archived."""
+    try:
+        from hermes.memory_service import reject_candidate
+        return {"success": reject_candidate(memory_id)}
+    except Exception as e:
+        raise HTTPException(503, f"Reject error: {str(e)}")
 
 
 @app.get("/api/memory/graph")
@@ -281,8 +379,16 @@ def memory_write(body: dict):
         ns = "claude" if target == "memory" else "user"
         if action == "replace" and old_text:
             delete_memory(old_text, namespace=ns)
-        result = write_memory(content=content, namespace=ns, source="mcp")
-        return {"success": True, "id": result.get("id"), "layer": result.get("layer")}
+        result = write_memory(
+            content=content,
+            namespace=ns,
+            source="mcp",
+            stage=body.get("stage", "memory"),
+            type=body.get("type", "NOTE"),
+            scope=body.get("scope", "global"),
+            project_id=body.get("project_id"),
+        )
+        return {"success": True, "id": result.get("id"), "stage": result.get("stage")}
     except Exception as e:
         raise HTTPException(503, f"Memory write error: {str(e)}")
 
@@ -308,6 +414,74 @@ def memory_delete(target: str = Query(...), substring: str = Query(...)):
         return {"success": ok}
     except Exception as e:
         raise HTTPException(503, f"Memory delete error: {str(e)}")
+
+
+# ── type_registry CRUD ─────────────────────────────────────────────────────
+
+@app.get("/api/memory/types")
+def memory_types(enabled_only: bool = Query(False)):
+    try:
+        from hermes.memory_service import list_types
+        return {"types": list_types(enabled_only=enabled_only)}
+    except Exception as e:
+        raise HTTPException(503, f"Types error: {str(e)}")
+
+
+@app.post("/api/memory/types")
+def memory_type_upsert(body: dict):
+    try:
+        from hermes.memory_service import upsert_type
+        return upsert_type(
+            body.get("name"),
+            body.get("label"),
+            body.get("color"),
+            body.get("sort_order", 0),
+            body.get("enabled", True),
+        )
+    except Exception as e:
+        raise HTTPException(503, f"Type upsert error: {str(e)}")
+
+
+@app.delete("/api/memory/types/{name}")
+def memory_type_delete(name: str):
+    try:
+        from hermes.memory_service import delete_type
+        return {"success": delete_type(name)}
+    except Exception as e:
+        raise HTTPException(503, f"Type delete error: {str(e)}")
+
+
+# ── projects CRUD ──────────────────────────────────────────────────────────
+
+@app.get("/api/memory/projects")
+def memory_projects(namespace: Optional[str] = Query(None)):
+    try:
+        from hermes.memory_service import list_projects
+        return {"projects": list_projects(namespace=namespace)}
+    except Exception as e:
+        raise HTTPException(503, f"Projects error: {str(e)}")
+
+
+@app.post("/api/memory/projects")
+def memory_project_create(body: dict):
+    try:
+        from hermes.memory_service import get_or_create_project
+        return get_or_create_project(
+            body.get("name"),
+            body.get("path"),
+            body.get("namespace", "claude"),
+        )
+    except Exception as e:
+        raise HTTPException(503, f"Project create error: {str(e)}")
+
+
+@app.delete("/api/memory/projects/{project_id}")
+def memory_project_delete(project_id: str):
+    try:
+        from hermes.memory_service import delete_project
+        return {"success": delete_project(project_id)}
+    except Exception as e:
+        raise HTTPException(503, f"Project delete error: {str(e)}")
 
 
 # ── Recap Ingest API ─────────────────────────────────────────────────────────

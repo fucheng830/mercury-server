@@ -104,7 +104,7 @@ def ingest_episodic(client_id: str, memories: List[Dict], date: str = "") -> Dic
     for m in memories:
         try:
             write_memory(
-                content=m.get("content", ""), layer="episodic", source="client_push",
+                content=m.get("content", ""), stage="observation", source="client_push",
                 importance=m.get("importance", 3), tags=m.get("tags", []),
                 summary=m.get("summary"), embedding=m.get("embedding"), auto_embed=False,
             )

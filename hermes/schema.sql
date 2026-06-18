@@ -55,59 +55,9 @@ CREATE TABLE IF NOT EXISTS memory_entities (
     PRIMARY KEY (memory_id, entity_id)
 );
 
-CREATE OR REPLACE FUNCTION hybrid_search(
-    query_text TEXT,
-    query_embedding vector(1024),
-    target_layer VARCHAR DEFAULT NULL,
-    match_limit INT DEFAULT 20,
-    rrf_k INT DEFAULT 60,
-    target_namespaces TEXT[] DEFAULT NULL
-)
-RETURNS TABLE (
-    id UUID, content TEXT, summary TEXT, layer VARCHAR,
-    source VARCHAR, importance SMALLINT, tags TEXT[],
-    namespace VARCHAR,
-    recall_count INTEGER, created_at TIMESTAMPTZ,
-    rrf_score REAL
-) AS $$
-BEGIN
-    RETURN QUERY
-    WITH vector_results AS (
-        SELECT m.id, row_number() OVER (ORDER BY m.embedding <=> query_embedding) AS rank
-        FROM memories m
-        WHERE m.embedding IS NOT NULL
-          AND (target_layer IS NULL OR m.layer = target_layer)
-          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
-    ),
-    fts_results AS (
-        SELECT m.id, row_number() OVER (
-            ORDER BY ts_rank(m.fts, plainto_tsquery('simple', query_text)) DESC
-        ) AS rank
-        FROM memories m
-        WHERE m.fts @@ plainto_tsquery('simple', query_text)
-          AND (target_layer IS NULL OR m.layer = target_layer)
-          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
-    ),
-    combined AS (
-        SELECT COALESCE(v.id, f.id) AS id,
-               CAST(
-                 (1.0 / (rrf_k + COALESCE(v.rank, 1000))) +
-                 (1.0 / (rrf_k + COALESCE(f.rank, 1000)))
-               AS REAL) AS rrf_score
-        FROM vector_results v
-        FULL OUTER JOIN fts_results f ON v.id = f.id
-    )
-    SELECT m.id, m.content, m.summary, m.layer,
-           m.source, m.importance, m.tags,
-           m.namespace,
-           m.recall_count, m.created_at,
-           c.rrf_score
-    FROM combined c
-    JOIN memories m ON m.id = c.id
-    ORDER BY c.rrf_score DESC
-    LIMIT match_limit;
-END;
-$$ LANGUAGE plpgsql;
+-- hybrid_search v2 (multi-filter + pagination) is defined in the
+-- Memory Model v2 migration section at the end of this file,
+-- after the stage/type/scope/status/project_id columns exist.
 
 -- ── Client-Server Tables ─────────────────────────────────────
 
@@ -188,3 +138,158 @@ CREATE TABLE IF NOT EXISTS a2a_agents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_a2a_agents_namespace ON a2a_agents(namespace);
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Memory Model v2 Migration (idempotent — runs every startup via init_db)
+-- observation → candidate → memory workflow + type/scope/status/project
+-- See docs/superpowers/specs/2026-06-18-memory-model-v2-design.md
+-- ════════════════════════════════════════════════════════════════════════
+
+-- ── projects ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS projects (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name       VARCHAR(200) NOT NULL,
+    path       TEXT,
+    namespace  VARCHAR(50) NOT NULL DEFAULT 'claude',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(namespace, name)
+);
+
+-- ── type_registry (extensible memory-type enum) ───────────────────────────
+CREATE TABLE IF NOT EXISTS type_registry (
+    name       VARCHAR(50) PRIMARY KEY,
+    label      VARCHAR(100) NOT NULL,
+    color      VARCHAR(20),
+    sort_order INTEGER DEFAULT 0,
+    enabled    BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+INSERT INTO type_registry (name, label, color, sort_order) VALUES
+  ('NOTE', '笔记', 'gray',   90),
+  ('DISCOVERY', '发现', 'blue',  10),
+  ('ARCH', '架构', 'blue',  20),
+  ('DECISION', '决策', 'blue',  30),
+  ('BUGFIX', '修复', 'red',   40),
+  ('PREFERENCE', '偏好', 'purple', 50)
+ON CONFLICT (name) DO NOTHING;
+
+-- ── memories: add v2 columns ──────────────────────────────────────────────
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS stage      VARCHAR(12);
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS type       VARCHAR(50) NOT NULL DEFAULT 'NOTE';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope      VARCHAR(10) NOT NULL DEFAULT 'global';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS status     VARCHAR(12) NOT NULL DEFAULT 'active';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS project_id UUID;
+
+-- ── backfill stage from legacy layer (only while layer column still exists) ─
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'memories' AND column_name = 'layer'
+    ) THEN
+        UPDATE memories SET stage = CASE
+            WHEN layer = 'episodic' THEN 'observation'
+            WHEN layer IN ('semantic', 'core') THEN 'memory'
+            ELSE 'memory'
+        END WHERE stage IS NULL;
+    END IF;
+END $$;
+
+ALTER TABLE memories ALTER COLUMN stage SET NOT NULL;
+
+-- CHECK / FK constraints wrapped in DO blocks: ADD CONSTRAINT has no IF NOT EXISTS
+DO $$ BEGIN
+    ALTER TABLE memories ADD CONSTRAINT memories_stage_chk  CHECK (stage IN ('observation', 'candidate', 'memory'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE memories ADD CONSTRAINT memories_scope_chk  CHECK (scope IN ('repo', 'global', 'user'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE memories ADD CONSTRAINT memories_status_chk CHECK (status IN ('active', 'archived', 'superseded'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE memories ADD CONSTRAINT memories_project_fk
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE INDEX IF NOT EXISTS idx_memories_stage    ON memories(stage);
+CREATE INDEX IF NOT EXISTS idx_memories_type     ON memories(type);
+CREATE INDEX IF NOT EXISTS idx_memories_status   ON memories(status);
+CREATE INDEX IF NOT EXISTS idx_memories_scope    ON memories(scope);
+CREATE INDEX IF NOT EXISTS idx_memories_project  ON memories(project_id);
+CREATE INDEX IF NOT EXISTS idx_memories_ns_stage ON memories(namespace, stage);
+CREATE INDEX IF NOT EXISTS idx_memories_updated  ON memories(updated_at DESC);
+
+-- ── hybrid_search v2 (multi-filter + pagination) ──────────────────────────
+DROP FUNCTION IF EXISTS hybrid_search;
+CREATE FUNCTION hybrid_search(
+    query_text        TEXT,
+    query_embedding   vector(1024),
+    target_stage      VARCHAR DEFAULT NULL,
+    target_types      TEXT[]  DEFAULT NULL,
+    target_scopes     TEXT[]  DEFAULT NULL,
+    target_statuses   TEXT[]  DEFAULT NULL,
+    target_project    UUID    DEFAULT NULL,
+    target_namespaces TEXT[]  DEFAULT NULL,
+    match_limit       INT     DEFAULT 20,
+    match_offset      INT     DEFAULT 0,
+    rrf_k             INT     DEFAULT 60
+) RETURNS TABLE (
+    id UUID, content TEXT, summary TEXT, stage VARCHAR, type VARCHAR,
+    scope VARCHAR, status VARCHAR, project_id UUID, source VARCHAR,
+    importance SMALLINT, tags TEXT[], namespace VARCHAR,
+    recall_count INTEGER, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
+    rrf_score REAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH vector_results AS (
+        SELECT m.id, row_number() OVER (ORDER BY m.embedding <=> query_embedding) AS rank
+        FROM memories m
+        WHERE m.embedding IS NOT NULL
+          AND (target_stage      IS NULL OR m.stage = target_stage)
+          AND (target_types      IS NULL OR m.type  = ANY(target_types))
+          AND (target_scopes     IS NULL OR m.scope = ANY(target_scopes))
+          AND (target_statuses   IS NULL OR m.status = ANY(target_statuses))
+          AND (target_project    IS NULL OR m.project_id = target_project)
+          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
+    ),
+    fts_results AS (
+        SELECT m.id, row_number() OVER (
+            ORDER BY ts_rank(m.fts, plainto_tsquery('simple', query_text)) DESC
+        ) AS rank
+        FROM memories m
+        WHERE m.fts @@ plainto_tsquery('simple', query_text)
+          AND (target_stage      IS NULL OR m.stage = target_stage)
+          AND (target_types      IS NULL OR m.type  = ANY(target_types))
+          AND (target_scopes     IS NULL OR m.scope = ANY(target_scopes))
+          AND (target_statuses   IS NULL OR m.status = ANY(target_statuses))
+          AND (target_project    IS NULL OR m.project_id = target_project)
+          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
+    ),
+    combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               CAST(
+                 (1.0 / (rrf_k + COALESCE(v.rank, 1000))) +
+                 (1.0 / (rrf_k + COALESCE(f.rank, 1000)))
+               AS REAL) AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.content, m.summary, m.stage, m.type,
+           m.scope, m.status, m.project_id, m.source,
+           m.importance, m.tags, m.namespace,
+           m.recall_count, m.created_at, m.updated_at,
+           c.rrf_score
+    FROM combined c
+    JOIN memories m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT match_limit OFFSET match_offset;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ── retire legacy layer ───────────────────────────────────────────────────
+DROP INDEX IF EXISTS idx_memories_layer;
+DROP INDEX IF EXISTS idx_memories_ns_layer;
+ALTER TABLE memories DROP COLUMN IF EXISTS layer;

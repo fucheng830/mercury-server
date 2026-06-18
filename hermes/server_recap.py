@@ -52,7 +52,7 @@ def run_server_recap(date: str = "", llm_service=None):
         try:
             result = write_memory(
                 content=m.get("content", ""),
-                layer="episodic",
+                stage="observation",
                 source="server_recap",
                 importance=m.get("importance", 3),
                 tags=m.get("tags", []),
@@ -126,7 +126,7 @@ def _simple_recap(date, texts):
     from hermes.memory_service import write_memory
     content = f"Date: {date}\nTotal sessions: {len(texts)}\n\n" + "\n".join(f"- {t[:200]}" for t in texts[:30])
     r = write_memory(
-        content=content, layer="episodic", source="server_recap",
+        content=content, stage="observation", source="server_recap",
         importance=2, tags=["daily-summary"], namespace="claude",
     )
     return [{"content": content, "summary": f"Daily recap {date}", "importance": 2, "tags": ["daily-summary"]}] if r else []

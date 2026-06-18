@@ -1,7 +1,12 @@
-"""High-level memory CRUD service with auto-embedding and hybrid search."""
+"""High-level memory CRUD service with auto-embedding and hybrid search.
+
+Memory model v2: observation -> candidate -> memory workflow with
+type / scope / status / project dimensions.
+See docs/superpowers/specs/2026-06-18-memory-model-v2-design.md
+"""
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from psycopg2.extras import RealDictCursor
@@ -11,11 +16,22 @@ from hermes.embedding import generate_embedding
 
 logger = logging.getLogger(__name__)
 
-LAYER_TTL_DAYS: Dict[str, Optional[int]] = {
-    "episodic": 30,
-    "semantic": 180,
-    "core": None,
+STAGE_TTL_DAYS: Dict[str, Optional[int]] = {
+    "observation": 30,
+    "candidate": 90,
+    "memory": None,
 }
+
+VALID_STAGES = ("observation", "candidate", "memory")
+VALID_SCOPES = ("repo", "global", "user")
+VALID_STATUSES = ("active", "archived", "superseded")
+
+# Canonical column list for memory reads (kept in sync with schema.sql v2).
+_MEM_COLUMNS = (
+    "id, stage, type, scope, status, project_id, content, summary, source, "
+    "importance, tags, embedding, namespace, recall_count, "
+    "created_at, expires_at, updated_at"
+)
 
 
 def _serialize_memory(row: Dict) -> Dict:
@@ -34,13 +50,24 @@ def _serialize_memory(row: Dict) -> Dict:
     return result
 
 
+def _stage_expiry(stage: str) -> Optional[datetime]:
+    ttl_days = STAGE_TTL_DAYS.get(stage)
+    if ttl_days is None:
+        return None
+    return datetime.now(timezone.utc) + timedelta(days=ttl_days)
+
+
 def write_memory(
     content: str,
-    layer: str = "episodic",
+    stage: str = "observation",
     source: str = "recap",
     importance: int = 3,
     tags: Optional[List[str]] = None,
     summary: Optional[str] = None,
+    type: str = "NOTE",
+    scope: str = "global",
+    status: str = "active",
+    project_id: Optional[str] = None,
     auto_embed: bool = True,
     embedding: Optional[List[float]] = None,
     namespace: str = "claude",
@@ -49,11 +76,15 @@ def write_memory(
 
     Args:
         content: The memory text content.
-        layer: Memory layer (episodic, semantic, core).
+        stage: Lifecycle stage (observation, candidate, memory).
         source: Origin of the memory.
         importance: Importance score 1-5.
         tags: Optional list of tags.
         summary: Optional short summary.
+        type: Memory type (NOTE/DISCOVERY/ARCH/DECISION/BUGFIX/PREFERENCE/...).
+        scope: Applicability scope (repo, global, user).
+        status: Lifecycle status (active, archived, superseded).
+        project_id: Optional linked project UUID.
         auto_embed: Whether to auto-generate an embedding.
         namespace: Namespace for agent isolation (default: claude).
 
@@ -72,12 +103,7 @@ def write_memory(
     else:
         emb = None
 
-    # Calculate expires_at based on layer TTL
-    ttl_days = LAYER_TTL_DAYS.get(layer)
-    expires_at = None
-    if ttl_days is not None:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
-
+    expires_at = _stage_expiry(stage)
     tags = tags or []
 
     conn = get_conn()
@@ -87,25 +113,29 @@ def write_memory(
             register_vector(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    """
-                    INSERT INTO memories (layer, content, summary, source, importance, tags, embedding, expires_at, namespace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s, %s)
-                    RETURNING id, layer, content, summary, source, importance, tags,
-                              embedding, namespace, recall_count, created_at, expires_at, updated_at
+                    f"""
+                    INSERT INTO memories
+                        (stage, type, scope, status, project_id, content, summary,
+                         source, importance, tags, embedding, expires_at, namespace)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s)
+                    RETURNING {_MEM_COLUMNS}
                     """,
-                    (layer, content, summary, source, importance, tags, emb, expires_at, namespace),
+                    (stage, type, scope, status, project_id, content, summary,
+                     source, importance, tags, emb, expires_at, namespace),
                 )
                 row = dict(cur.fetchone())
         else:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    """
-                    INSERT INTO memories (layer, content, summary, source, importance, tags, expires_at, namespace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id, layer, content, summary, source, importance, tags,
-                              embedding, namespace, recall_count, created_at, expires_at, updated_at
+                    f"""
+                    INSERT INTO memories
+                        (stage, type, scope, status, project_id, content, summary,
+                         source, importance, tags, expires_at, namespace)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING {_MEM_COLUMNS}
                     """,
-                    (layer, content, summary, source, importance, tags, expires_at, namespace),
+                    (stage, type, scope, status, project_id, content, summary,
+                     source, importance, tags, expires_at, namespace),
                 )
                 row = dict(cur.fetchone())
         conn.commit()
@@ -118,46 +148,87 @@ def write_memory(
     return _serialize_memory(row)
 
 
+def list_memories(
+    stage: Optional[str] = None,
+    types: Optional[List[str]] = None,
+    scopes: Optional[List[str]] = None,
+    statuses: Optional[List[str]] = None,
+    project_id: Optional[str] = None,
+    namespaces: Optional[List[str]] = None,
+    search: Optional[str] = None,
+    sort: str = "updated_at",
+    order: str = "desc",
+    page: int = 1,
+    size: int = 25,
+) -> Dict:
+    """Multi-filter, paginated memory list for the 'All memories' view."""
+    conditions: List[str] = []
+    params: List[Any] = []
+    if stage:
+        conditions.append("stage = %s")
+        params.append(stage)
+    if types:
+        conditions.append("type = ANY(%s)")
+        params.append(list(types))
+    if scopes:
+        conditions.append("scope = ANY(%s)")
+        params.append(list(scopes))
+    if statuses:
+        conditions.append("status = ANY(%s)")
+        params.append(list(statuses))
+    if project_id:
+        conditions.append("project_id = %s")
+        params.append(project_id)
+    if namespaces:
+        conditions.append("namespace = ANY(%s)")
+        params.append(list(namespaces))
+    if search:
+        conditions.append("fts @@ plainto_tsquery('simple', %s)")
+        params.append(search)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    allowed_sorts = {"updated_at", "created_at", "importance", "recall_count", "stage", "type"}
+    sort_col = sort if sort in allowed_sorts else "updated_at"
+    order_dir = "DESC" if order.lower() == "desc" else "ASC"
+
+    total_row = execute_one(f"SELECT COUNT(*) AS cnt FROM memories {where}", tuple(params))
+    total = total_row["cnt"] if total_row else 0
+
+    offset = max(0, (page - 1) * size)
+    rows = execute(
+        f"SELECT {_MEM_COLUMNS} FROM memories {where} "
+        f"ORDER BY {sort_col} {order_dir} LIMIT %s OFFSET %s",
+        tuple(params) + (size, offset),
+        fetch=True,
+    )
+    return {
+        "items": [_serialize_memory(r) for r in (rows or [])],
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": max(1, (total + size - 1) // size),
+    }
+
+
 def read_memories(
-    layer: Optional[str] = None,
+    stage: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     namespace: str = "claude",
 ) -> List[Dict]:
-    """Read memories, optionally filtered by layer and namespace.
-
-    Args:
-        layer: Optional layer filter.
-        limit: Max results.
-        offset: Result offset for pagination.
-        namespace: Namespace filter (default: claude).
-
-    Returns:
-        List of serialized memory dicts.
-    """
-    if layer:
+    """Read memories, optionally filtered by stage and namespace."""
+    if stage:
         rows = execute(
-            """
-            SELECT id, layer, content, summary, source, importance, tags,
-                   embedding, namespace, recall_count, created_at, expires_at, updated_at
-            FROM memories
-            WHERE layer = %s AND namespace = %s
-            ORDER BY created_at DESC
-            LIMIT %s OFFSET %s
-            """,
-            (layer, namespace, limit, offset),
+            f"SELECT {_MEM_COLUMNS} FROM memories WHERE stage = %s AND namespace = %s "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (stage, namespace, limit, offset),
             fetch=True,
         )
     else:
         rows = execute(
-            """
-            SELECT id, layer, content, summary, source, importance, tags,
-                   embedding, namespace, recall_count, created_at, expires_at, updated_at
-            FROM memories
-            WHERE namespace = %s
-            ORDER BY created_at DESC
-            LIMIT %s OFFSET %s
-            """,
+            f"SELECT {_MEM_COLUMNS} FROM memories WHERE namespace = %s "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (namespace, limit, offset),
             fetch=True,
         )
@@ -166,12 +237,7 @@ def read_memories(
 
 def get_memory(memory_id: str, namespace: str = "claude") -> Optional[Dict]:
     row = execute_one(
-        """
-        SELECT id, layer, content, summary, source, importance, tags,
-               embedding, namespace, recall_count, created_at, expires_at, updated_at
-        FROM memories
-        WHERE id = %s AND namespace = %s
-        """,
+        f"SELECT {_MEM_COLUMNS} FROM memories WHERE id = %s AND namespace = %s",
         (memory_id, namespace),
     )
     if row is None:
@@ -185,30 +251,25 @@ def delete_memory(memory_id: str, namespace: str = "claude") -> bool:
         (memory_id, namespace),
         fetch=False,
     )
-    check = execute_one(
-        "SELECT id FROM memories WHERE id = %s",
-        (memory_id,),
-    )
+    check = execute_one("SELECT id FROM memories WHERE id = %s", (memory_id,))
     return check is None
 
 
 def search_memories(
     query_text: str,
-    layer: Optional[str] = None,
+    stage: Optional[str] = None,
+    types: Optional[List[str]] = None,
+    scopes: Optional[List[str]] = None,
+    statuses: Optional[List[str]] = None,
+    project_id: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
     namespaces: Optional[List[str]] = None,
 ) -> List[Dict]:
     """Hybrid search combining vector similarity and full-text search via RRF.
-    Supports multi-namespace search for cross-agent queries.
 
-    Args:
-        query_text: The search query.
-        layer: Optional layer filter.
-        limit: Max results.
-        namespaces: Namespaces to search. Default: ["claude"].
-
-    Returns:
-        List of serialized memory dicts with rrf_score.
+    Supports multi-dimension filtering (stage/type/scope/status/project/namespace)
+    and pagination.
     """
     if namespaces is None:
         namespaces = ["claude"]
@@ -219,7 +280,8 @@ def search_memories(
         embedding_vec = np.array(vec, dtype=np.float32)
     except Exception:
         logger.warning("Failed to generate query embedding, falling back to FTS")
-        return _fts_search(query_text, layer, limit, namespaces)
+        return _fts_search(query_text, stage, types, scopes, statuses, project_id,
+                           limit, offset, namespaces)
 
     conn = get_conn()
     try:
@@ -228,11 +290,13 @@ def search_memories(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, content, summary, layer, source, importance, tags,
-                       namespace, recall_count, created_at, rrf_score
-                FROM hybrid_search(%s, %s::vector, %s, %s, 60, %s::varchar[])
+                SELECT id, content, summary, stage, type, scope, status, project_id,
+                       source, importance, tags, namespace, recall_count,
+                       created_at, updated_at, rrf_score
+                FROM hybrid_search(%s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s, 60)
                 """,
-                (query_text, embedding_vec, layer, limit, namespaces),
+                (query_text, embedding_vec, stage, types, scopes, statuses,
+                 project_id, namespaces, limit, offset),
             )
             rows = [dict(r) for r in cur.fetchall()]
     finally:
@@ -252,81 +316,135 @@ def search_memories(
 
 def _fts_search(
     query_text: str,
-    layer: Optional[str] = None,
+    stage: Optional[str] = None,
+    types: Optional[List[str]] = None,
+    scopes: Optional[List[str]] = None,
+    statuses: Optional[List[str]] = None,
+    project_id: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
     namespaces: Optional[List[str]] = None,
 ) -> List[Dict]:
     if namespaces is None:
         namespaces = ["claude"]
-    if layer:
-        rows = execute(
-            """
-            SELECT id, layer, content, summary, source, importance, tags,
-                   namespace, recall_count, created_at, expires_at, updated_at
-            FROM memories
-            WHERE fts @@ plainto_tsquery('simple', %s)
-              AND layer = %s
-              AND namespace = ANY(%s::varchar[])
-            ORDER BY ts_rank(fts, plainto_tsquery('simple', %s)) DESC
-            LIMIT %s
-            """,
-            (query_text, layer, namespaces, query_text, limit),
-            fetch=True,
-        )
-    else:
-        rows = execute(
-            """
-            SELECT id, layer, content, summary, source, importance, tags,
-                   namespace, recall_count, created_at, expires_at, updated_at
-            FROM memories
-            WHERE fts @@ plainto_tsquery('simple', %s)
-              AND namespace = ANY(%s::varchar[])
-            ORDER BY ts_rank(fts, plainto_tsquery('simple', %s)) DESC
-            LIMIT %s
-            """,
-            (query_text, namespaces, query_text, limit),
-            fetch=True,
-        )
+    conditions = ["fts @@ plainto_tsquery('simple', %s)"]
+    params: List[Any] = [query_text]
+    if stage:
+        conditions.append("stage = %s")
+        params.append(stage)
+    if types:
+        conditions.append("type = ANY(%s)")
+        params.append(list(types))
+    if scopes:
+        conditions.append("scope = ANY(%s)")
+        params.append(list(scopes))
+    if statuses:
+        conditions.append("status = ANY(%s)")
+        params.append(list(statuses))
+    if project_id:
+        conditions.append("project_id = %s")
+        params.append(project_id)
+    conditions.append("namespace = ANY(%s)")
+    params.append(namespaces)
+
+    rows = execute(
+        f"SELECT {_MEM_COLUMNS} FROM memories WHERE {' AND '.join(conditions)} "
+        "ORDER BY ts_rank(fts, plainto_tsquery('simple', %s)) DESC LIMIT %s OFFSET %s",
+        tuple(params) + (query_text, limit, offset),
+        fetch=True,
+    )
     return [_serialize_memory(r) for r in (rows or [])]
 
 
-def promote_memory(memory_id: str, target_layer: str = "core", namespace: str = "claude") -> bool:
-    now = datetime.now(timezone.utc)
-    ttl_days = LAYER_TTL_DAYS.get(target_layer)
-    new_expires = None
-    if ttl_days is not None:
-        new_expires = now + timedelta(days=ttl_days)
+# ── Stage transitions (observation -> candidate -> memory) ────────────────
 
+def distill_to_candidate(memory_id: str, namespace: str = "claude") -> bool:
+    """observation -> candidate. Automatic LLM-distilled promotion."""
+    now = datetime.now(timezone.utc)
     execute(
         """
         UPDATE memories
-        SET layer = %s, expires_at = %s, updated_at = %s
-        WHERE id = %s AND namespace = %s
+        SET stage = 'candidate', expires_at = %s, updated_at = %s
+        WHERE id = %s AND namespace = %s AND stage = 'observation'
         """,
-        (target_layer, new_expires, now, memory_id, namespace),
+        (_stage_expiry("candidate"), now, memory_id, namespace),
     )
     row = execute_one(
-        "SELECT layer FROM memories WHERE id = %s AND namespace = %s",
+        "SELECT stage FROM memories WHERE id = %s AND namespace = %s",
         (memory_id, namespace),
     )
-    return row is not None and row["layer"] == target_layer
+    return row is not None and row["stage"] == "candidate"
+
+
+def confirm_candidate(
+    memory_id: str,
+    namespace: str = "claude",
+    type: Optional[str] = None,
+    scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> bool:
+    """candidate -> memory. Human confirmation gate (may override type/scope/project)."""
+    now = datetime.now(timezone.utc)
+    sets = ["stage = 'memory'", "expires_at = NULL", "updated_at = %s"]
+    params: List[Any] = [now]
+    if type:
+        sets.append("type = %s")
+        params.append(type)
+    if scope:
+        sets.append("scope = %s")
+        params.append(scope)
+    if project_id:
+        sets.append("project_id = %s")
+        params.append(project_id)
+    params += [memory_id, namespace]
+    execute(
+        f"""
+        UPDATE memories
+        SET {', '.join(sets)}
+        WHERE id = %s AND namespace = %s AND stage = 'candidate'
+        """,
+        tuple(params),
+    )
+    row = execute_one(
+        "SELECT stage FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    return row is not None and row["stage"] == "memory"
+
+
+def reject_candidate(memory_id: str, namespace: str = "claude") -> bool:
+    """candidate -> archived. Human rejection at the confirmation gate."""
+    now = datetime.now(timezone.utc)
+    execute(
+        """
+        UPDATE memories
+        SET status = 'archived', updated_at = %s
+        WHERE id = %s AND namespace = %s AND stage = 'candidate'
+        """,
+        (now, memory_id, namespace),
+    )
+    row = execute_one(
+        "SELECT status FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    return row is not None and row["status"] == "archived"
 
 
 def auto_promote(namespace: Optional[str] = None) -> int:
-    """Auto-promote semantic memories meeting criteria to core layer.
-    If namespace is None, promotes across all namespaces.
+    """Auto-promote high-confidence candidates to memory.
 
-    Returns:
-        Number of memories promoted.
+    Bypass for candidates with importance >= 5 or recall_count >= 5.
+    If namespace is None, promotes across all namespaces.
     """
     now = datetime.now(timezone.utc)
     if namespace:
         result = execute(
             """
             UPDATE memories
-            SET layer = 'core', expires_at = NULL, updated_at = %s
-            WHERE layer = 'semantic'
-              AND (importance >= 4 OR recall_count >= 3)
+            SET stage = 'memory', expires_at = NULL, updated_at = %s
+            WHERE stage = 'candidate'
+              AND status = 'active'
+              AND (importance >= 5 OR recall_count >= 5)
               AND namespace = %s
             RETURNING id
             """,
@@ -337,9 +455,10 @@ def auto_promote(namespace: Optional[str] = None) -> int:
         result = execute(
             """
             UPDATE memories
-            SET layer = 'core', expires_at = NULL, updated_at = %s
-            WHERE layer = 'semantic'
-              AND (importance >= 4 OR recall_count >= 3)
+            SET stage = 'memory', expires_at = NULL, updated_at = %s
+            WHERE stage = 'candidate'
+              AND status = 'active'
+              AND (importance >= 5 OR recall_count >= 5)
             RETURNING id
             """,
             (now,),
@@ -349,32 +468,36 @@ def auto_promote(namespace: Optional[str] = None) -> int:
 
 
 def get_memory_stats(namespace: str = "claude") -> Dict:
-    layer_stats = execute(
+    stage_stats = execute(
         """
-        SELECT layer, COUNT(*) as count, ROUND(AVG(importance)::numeric, 1) as avg_importance
+        SELECT stage, COUNT(*) AS count,
+               ROUND(AVG(importance)::numeric, 1) AS avg_importance
         FROM memories WHERE namespace = %s
-        GROUP BY layer
+        GROUP BY stage
         """,
         (namespace,),
         fetch=True,
     )
-    counts_by_layer = {}
+    counts_by_stage: Dict[str, Dict] = {}
     total = 0
-    for row in (layer_stats or []):
-        counts_by_layer[row["layer"]] = {
+    for row in (stage_stats or []):
+        counts_by_stage[row["stage"]] = {
             "count": row["count"],
             "avg_importance": float(row["avg_importance"]) if row["avg_importance"] else 0,
         }
         total += row["count"]
 
-    entity_row = execute_one("SELECT COUNT(*) as count FROM entities")
-    relation_row = execute_one("SELECT COUNT(*) as count FROM relations")
+    entity_row = execute_one("SELECT COUNT(*) AS count FROM entities")
+    relation_row = execute_one("SELECT COUNT(*) AS count FROM relations")
+
+    def _stage(name: str) -> Dict:
+        return counts_by_stage.get(name, {"count": 0, "avg_importance": 0})
 
     return {
         "total": total,
-        "episodic": counts_by_layer.get("episodic", {"count": 0, "avg_importance": 0}),
-        "semantic": counts_by_layer.get("semantic", {"count": 0, "avg_importance": 0}),
-        "core": counts_by_layer.get("core", {"count": 0, "avg_importance": 0}),
+        "observation": _stage("observation"),
+        "candidate": _stage("candidate"),
+        "memory": _stage("memory"),
         "entities": entity_row["count"] if entity_row else 0,
         "relations": relation_row["count"] if relation_row else 0,
     }
@@ -391,12 +514,86 @@ def share_memory(memory_id: str, owner_namespace: str) -> bool:
         """,
         (now, memory_id, owner_namespace),
     )
-    check = execute_one(
-        "SELECT namespace FROM memories WHERE id = %s",
-        (memory_id,),
-    )
+    check = execute_one("SELECT namespace FROM memories WHERE id = %s", (memory_id,))
     return check is not None and check["namespace"] == "shared"
 
+
+# ── type_registry CRUD ────────────────────────────────────────────────────
+
+def list_types(enabled_only: bool = False) -> List[Dict]:
+    where = "WHERE enabled = true" if enabled_only else ""
+    rows = execute(
+        f"SELECT name, label, color, sort_order, enabled, created_at "
+        f"FROM type_registry {where} ORDER BY sort_order, name",
+        fetch=True,
+    )
+    return [_serialize_memory(r) for r in (rows or [])]
+
+
+def upsert_type(name: str, label: str, color: Optional[str] = None,
+                sort_order: int = 0, enabled: bool = True) -> Optional[Dict]:
+    row = execute_one(
+        """
+        INSERT INTO type_registry (name, label, color, sort_order, enabled)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (name) DO UPDATE SET
+            label = EXCLUDED.label,
+            color = EXCLUDED.color,
+            sort_order = EXCLUDED.sort_order,
+            enabled = EXCLUDED.enabled
+        RETURNING name, label, color, sort_order, enabled, created_at
+        """,
+        (name, label, color, sort_order, enabled),
+    )
+    return _serialize_memory(dict(row)) if row else None
+
+
+def delete_type(name: str) -> bool:
+    execute("DELETE FROM type_registry WHERE name = %s", (name,), fetch=False)
+    check = execute_one("SELECT name FROM type_registry WHERE name = %s", (name,))
+    return check is None
+
+
+# ── projects CRUD ─────────────────────────────────────────────────────────
+
+def list_projects(namespace: Optional[str] = None) -> List[Dict]:
+    if namespace:
+        rows = execute(
+            "SELECT id, name, path, namespace, created_at, updated_at "
+            "FROM projects WHERE namespace = %s ORDER BY name",
+            (namespace,),
+            fetch=True,
+        )
+    else:
+        rows = execute(
+            "SELECT id, name, path, namespace, created_at, updated_at "
+            "FROM projects ORDER BY namespace, name",
+            fetch=True,
+        )
+    return [_serialize_memory(r) for r in (rows or [])]
+
+
+def get_or_create_project(name: str, path: Optional[str] = None,
+                          namespace: str = "claude") -> Dict:
+    row = execute_one(
+        """
+        INSERT INTO projects (name, path, namespace)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (namespace, name) DO UPDATE SET path = EXCLUDED.path
+        RETURNING id, name, path, namespace, created_at, updated_at
+        """,
+        (name, path, namespace),
+    )
+    return _serialize_memory(dict(row)) if row else {}
+
+
+def delete_project(project_id: str) -> bool:
+    execute("DELETE FROM projects WHERE id = %s", (project_id,), fetch=False)
+    check = execute_one("SELECT id FROM projects WHERE id = %s", (project_id,))
+    return check is None
+
+
+# ── A2A Agents ────────────────────────────────────────────────────────────
 
 def register_agent(
     agent_id: str,

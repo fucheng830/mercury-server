@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def migrate_md_entries() -> Dict[str, int]:
-    """Migrate MEMORY.md and USER.md entries to core layer."""
+    """Migrate MEMORY.md and USER.md entries to memory stage."""
     from recap_config import get_hermes_config
     from hermes.memory_service import write_memory
 
@@ -34,7 +34,7 @@ def migrate_md_entries() -> Dict[str, int]:
                 tags.append("user-profile")
             write_memory(
                 content=entry,
-                layer="core",
+                stage="memory",
                 source="migration",
                 importance=4,
                 tags=tags,
@@ -42,12 +42,12 @@ def migrate_md_entries() -> Dict[str, int]:
             )
             migrated += 1
 
-    logger.info(f"Migrated {migrated} MD entries to core layer")
+    logger.info(f"Migrated {migrated} MD entries to memory stage")
     return {"md_entries": migrated}
 
 
 def migrate_historical_recaps() -> Dict[str, int]:
-    """Migrate all existing recap JSON files to episodic layer."""
+    """Migrate all existing recap JSON files to observation stage."""
     from recap_config import get_storage_config
     from hermes.iteration import run_daily_ingestion
 

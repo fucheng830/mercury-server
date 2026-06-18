@@ -22,7 +22,7 @@ def read_memory(target: str = "all") -> Dict[str, Any]:
         result["memory"] = {
             "entries": [m["content"] for m in memories],
             "count": len(memories),
-            "layers": list(set(m["layer"] for m in memories)),
+            "stages": list(set(m["stage"] for m in memories)),
         }
 
     if target in ("user", "all"):
@@ -50,7 +50,7 @@ def write_memory(target: str, action: str, content: str, old_text: str = "") -> 
 
     mem = _write(
         content=content,
-        layer="core",
+        stage="memory",
         source="agent",
         importance=4,
         tags=tags,
