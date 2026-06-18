@@ -166,13 +166,18 @@ CREATE TABLE IF NOT EXISTS type_registry (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 INSERT INTO type_registry (name, label, color, sort_order) VALUES
-  ('NOTE', '笔记', 'gray',   90),
-  ('DISCOVERY', '发现', 'blue',  10),
+  ('DISCOVERY', '发现', 'green',  10),
   ('ARCH', '架构', 'blue',  20),
   ('DECISION', '决策', 'blue',  30),
   ('BUGFIX', '修复', 'red',   40),
-  ('PREFERENCE', '偏好', 'purple', 50)
-ON CONFLICT (name) DO NOTHING;
+  ('PREFERENCE', '偏好', 'purple', 50),
+  ('PROCEDURE', '流程', 'gray',  60),
+  ('SESSION', '会话', 'gray',  70),
+  ('NOTE', '笔记', 'gray',  90)
+ON CONFLICT (name) DO UPDATE SET
+  label = EXCLUDED.label,
+  color = EXCLUDED.color,
+  sort_order = EXCLUDED.sort_order;
 
 -- ── memories: add v2 columns ──────────────────────────────────────────────
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS stage      VARCHAR(12);
