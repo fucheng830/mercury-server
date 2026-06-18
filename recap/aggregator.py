@@ -156,6 +156,17 @@ def aggregate_daily(
     target_date: str,
 ) -> Optional[DailySummary]:
     """Aggregate all sessions for a specific date (YYYY-MM-DD)."""
+    # Try filesystem provider first
+    daily = _aggregate_from_provider(provider, target_date)
+    if daily:
+        return daily
+
+    # Fallback to database
+    return _aggregate_from_db(target_date)
+
+
+def _aggregate_from_provider(provider, target_date: str) -> Optional[DailySummary]:
+    """Aggregate from filesystem provider."""
     target_dt = datetime.strptime(target_date, "%Y-%m-%d")
     day_start = target_dt.replace(hour=0, minute=0, second=0)
     day_end = target_dt.replace(hour=23, minute=59, second=59)
@@ -221,8 +232,74 @@ def aggregate_daily(
     )
 
 
+def _aggregate_from_db(target_date: str) -> Optional[DailySummary]:
+    """Aggregate sessions from PostgreSQL for a given date."""
+    from hermes.db import execute
+
+    rows = execute(
+        "SELECT session_id, project_id, project_path, preview, "
+        "message_count, token_input, token_output, "
+        "first_ts, last_ts "
+        "FROM sessions "
+        "WHERE ((last_ts AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = %s::date "
+        "       OR (last_ts IS NULL AND (file_mtime AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = %s::date)) "
+        "ORDER BY last_ts",
+        (target_date, target_date),
+        fetch=True,
+    )
+    if not rows:
+        return None
+
+    sessions = []
+    projects_set = set()
+
+    for r in rows:
+        ts_in = r.get("token_input") or 0
+        ts_out = r.get("token_output") or 0
+        project = r.get("project_path") or r.get("project_id", "")
+        projects_set.add(project)
+
+        sessions.append(SessionSummary(
+            session_id=r.get("session_id", ""),
+            project=project,
+            start_time=r.get("first_ts").isoformat() if r.get("first_ts") else "",
+            end_time=r.get("last_ts").isoformat() if r.get("last_ts") else "",
+            model="",
+            token_usage={"input": ts_in, "output": ts_out},
+            files_modified=[],
+            commands_run=[],
+            tools_used={},
+            user_prompts=[r.get("preview", "")] if r.get("preview") else [],
+            assistant_summaries=[],
+        ))
+
+    total_tokens = sum(
+        s.token_usage.get("input", 0) + s.token_usage.get("output", 0)
+        for s in sessions
+    )
+
+    return DailySummary(
+        date=target_date,
+        total_sessions=len(sessions),
+        total_tokens=total_tokens,
+        sessions=sessions,
+        unique_projects=sorted(projects_set),
+        files_modified=[],
+        key_operations=[],
+    )
+
+
 def get_available_dates(provider, months: int = 3) -> List[Dict[str, Any]]:
     """Get list of dates that have sessions, for calendar view."""
+    # Try filesystem first
+    result = _get_dates_from_provider(provider, months)
+    if result:
+        return result
+    # Fallback to database
+    return _get_dates_from_db(months)
+
+
+def _get_dates_from_provider(provider, months: int = 3) -> List[Dict[str, Any]]:
     from datetime import timedelta
     projects_dir = provider.root / "projects"
     if not projects_dir.exists():
@@ -245,4 +322,23 @@ def get_available_dates(provider, months: int = 3) -> List[Dict[str, Any]]:
     return [
         {"date": d, "session_count": c}
         for d, c in sorted(date_sessions.items(), reverse=True)
+    ]
+
+
+def _get_dates_from_db(months: int = 3) -> List[Dict[str, Any]]:
+    from hermes.db import execute
+
+    rows = execute(
+        "SELECT (COALESCE(last_ts, file_mtime) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date as day, COUNT(*) as cnt "
+        "FROM sessions "
+        "WHERE COALESCE(last_ts, file_mtime) >= now() - interval '%s months' "
+        "GROUP BY day ORDER BY day DESC",
+        (months,),
+        fetch=True,
+    )
+    if not rows:
+        return []
+    return [
+        {"date": str(r["day"]), "session_count": r["cnt"]}
+        for r in rows
     ]

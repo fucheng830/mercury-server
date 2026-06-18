@@ -1,6 +1,7 @@
 """Claude History Viewer - FastAPI Backend"""
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import sys
@@ -9,6 +10,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+from contextlib import asynccontextmanager
 
 from providers import get_provider, list_sources
 
@@ -26,8 +29,6 @@ def get_base_path():
     return Path(__file__).parent
 
 
-app = FastAPI(title="Claude History Viewer")
-
 # ── Recap & Memory Init ──
 try:
     _llm_service = LLMService(get_llm_config())
@@ -41,22 +42,38 @@ def _get_claude_provider():
     return get_provider("claude")
 
 
-@app.on_event("startup")
-async def _on_startup():
+@asynccontextmanager
+async def _lifespan(app):
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+
+    logger.info("Lifespan startup begin")
+
     try:
         from hermes.db import init_db
         init_db()
+        logger.info("DB init done")
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"DB init failed: {e}")
+        logger.warning(f"DB init failed: {e}")
+
+    logger.info(f"LLM service: {_llm_service is not None}")
     if _llm_service:
         start_scheduler(_get_claude_provider(), _llm_service)
+        logger.info("Scheduler started")
+    else:
+        logger.warning("No LLM service, scheduler not started")
 
-
-@app.on_event("shutdown")
-async def _on_shutdown():
+    yield
     stop_scheduler()
+    logger.info("Lifespan shutdown")
 
+
+app = FastAPI(title="Claude History Viewer", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -202,6 +219,31 @@ def memory_stats():
         return get_memory_stats()
     except Exception as e:
         raise HTTPException(503, f"Memory stats error: {str(e)}")
+
+
+@app.get("/api/memory/recent")
+def memory_recent(limit: int = Query(20, ge=1, le=100), layer: Optional[str] = Query(None)):
+    try:
+        from hermes.db import execute
+        if layer:
+            rows = execute(
+                "SELECT id, content, summary, layer, source, importance, tags, "
+                "recall_count, created_at "
+                "FROM memories WHERE layer = %s ORDER BY created_at DESC LIMIT %s",
+                (layer, limit),
+                fetch=True,
+            )
+        else:
+            rows = execute(
+                "SELECT id, content, summary, layer, source, importance, tags, "
+                "recall_count, created_at "
+                "FROM memories ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+                fetch=True,
+            )
+        return rows or []
+    except Exception as e:
+        raise HTTPException(503, f"Memory recent error: {str(e)}")
 
 
 @app.get("/api/memory/graph")
@@ -462,7 +504,218 @@ def a2a_agent_stats(agent_id: str):
     return get_memory_stats(namespace=agent_id)
 
 
-# ── Source-Scoped Routes ─────────────────────────────────────────────────────
+# ── Source-Scoped Routes (with DB fallback) ────────────────────────────────
+
+
+def _db_dashboard_stats(range_str: str) -> dict:
+    from collections import defaultdict
+    from hermes.db import execute
+
+    now = datetime.now(timezone.utc)
+    if range_str == "7d":
+        cutoff = now - timedelta(days=7)
+    elif range_str == "30d":
+        cutoff = now - timedelta(days=30)
+    else:
+        cutoff = None
+
+    rows = execute(
+        "SELECT project_id, session_id, preview, message_count, "
+        "token_input, token_output, first_ts, "
+        "COALESCE(last_ts, file_mtime) as last_ts "
+        "FROM sessions ORDER BY last_ts DESC",
+        fetch=True,
+    )
+    if rows is None:
+        rows = []
+
+    total_input = 0
+    total_output = 0
+    daily_sessions = defaultdict(int)
+    daily_tokens_in = defaultdict(int)
+    daily_tokens_out = defaultdict(int)
+    project_counts = defaultdict(lambda: {"count": 0, "name": ""})
+    curr_sessions = 0
+
+    for r in rows:
+        inp = r.get("token_input") or 0
+        out = r.get("token_output") or 0
+        total_input += inp
+        total_output += out
+
+        last_ts = r.get("last_ts")
+        if last_ts:
+            if cutoff is None or last_ts >= cutoff:
+                curr_sessions += 1
+                day_str = last_ts.strftime("%Y-%m-%d") if hasattr(last_ts, "strftime") else str(last_ts)[:10]
+                daily_sessions[day_str] += 1
+                daily_tokens_in[day_str] += inp
+                daily_tokens_out[day_str] += out
+
+        pid = r.get("project_id", "")
+        project_counts[pid]["count"] += 1
+        ppath = r.get("project_path") or r.get("preview") or ""
+        if ppath and not project_counts[pid]["name"]:
+            project_counts[pid]["name"] = ppath
+
+    top_projects = sorted(project_counts.values(), key=lambda x: x["count"], reverse=True)[:5]
+    top_projects_out = [
+        {"project_id": k, "project_name": v["name"] or k, "session_count": v["count"]}
+        for k, v in sorted(project_counts.items(), key=lambda x: x[1]["count"], reverse=True)[:5]
+    ]
+
+    daily_series = [
+        {
+            "date": d,
+            "sessions": daily_sessions[d],
+            "commands": 0,
+            "tokens": daily_tokens_in[d] + daily_tokens_out[d],
+        }
+        for d in sorted(daily_sessions.keys())
+    ]
+
+    return {
+        "summary": {
+            "total_commands": 0,
+            "total_sessions": len(rows),
+            "total_projects": len(project_counts),
+            "total_tokens": {"input": total_input, "output": total_output},
+        },
+        "changes": {"commands_pct": 0, "sessions_pct": 0, "projects_new": 0, "tokens_pct": 0},
+        "daily_series": daily_series,
+        "message_types": {},
+        "top_projects": top_projects_out,
+        "hourly_distribution": [0] * 24,
+        "session_durations": {},
+    }
+
+
+def _db_recent_sessions(limit: int) -> list:
+    from hermes.db import execute
+
+    rows = execute(
+        "SELECT session_id, project_id, project_path, preview, "
+        "message_count, token_input, token_output, "
+        "COALESCE(last_ts, file_mtime) as last_ts "
+        "FROM sessions ORDER BY COALESCE(last_ts, file_mtime) DESC LIMIT %s",
+        (limit,),
+        fetch=True,
+    )
+    if rows is None:
+        return []
+    return [
+        {
+            "session_id": r.get("session_id", ""),
+            "project_id": r.get("project_id", ""),
+            "project_path": r.get("project_path") or r.get("project_id", ""),
+            "preview": r.get("preview", ""),
+            "message_count": r.get("message_count", 0),
+            "token_input": r.get("token_input", 0),
+            "token_output": r.get("token_output", 0),
+            "timestamp": r.get("last_ts").isoformat() if r.get("last_ts") else None,
+            "size": 0,
+        }
+        for r in rows
+    ]
+
+
+def _db_list_projects() -> list:
+    from hermes.db import execute
+
+    rows = execute(
+        "SELECT project_id, COUNT(*) as session_count, "
+        "MAX(project_path) as project_path, SUM(token_input + token_output) as total_tokens "
+        "FROM sessions GROUP BY project_id ORDER BY session_count DESC",
+        fetch=True,
+    )
+    if rows is None:
+        return []
+    return [
+        {
+            "id": r["project_id"],
+            "path": r.get("project_path") or r["project_id"],
+            "display_name": r["project_id"],
+            "session_count": r["session_count"],
+            "size": 0,
+        }
+        for r in rows
+    ]
+
+
+def _db_get_history(page: int, limit: int, search: Optional[str], project: Optional[str]) -> dict:
+    from hermes.db import execute
+
+    conditions = []
+    params = []
+    if search:
+        conditions.append("preview ILIKE %s")
+        params.append(f"%{search}%")
+    if project:
+        conditions.append("project_id ILIKE %s")
+        params.append(f"%{project}%")
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    total_row = execute(f"SELECT COUNT(*) as cnt FROM sessions {where}", tuple(params), fetch=True)
+    total = total_row[0]["cnt"] if total_row else 0
+
+    offset = (page - 1) * limit
+    rows = execute(
+        f"SELECT session_id, project_id, project_path, preview, message_count, "
+        f"COALESCE(last_ts, file_mtime) as last_ts "
+        f"FROM sessions {where} "
+        f"ORDER BY COALESCE(last_ts, file_mtime) DESC "
+        f"LIMIT %s OFFSET %s",
+        tuple(params) + (limit, offset),
+        fetch=True,
+    )
+
+    items = []
+    for r in (rows or []):
+        ts = r.get("last_ts")
+        ts_val = int(ts.timestamp() * 1000) if ts else 0
+        items.append({
+            "display": r.get("preview", ""),
+            "project": r.get("project_path") or r.get("project_id", ""),
+            "sessionId": r.get("session_id", ""),
+            "project_id": r.get("project_id", ""),
+            "timestamp": ts_val,
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": max(1, (total + limit - 1) // limit),
+    }
+
+
+def _try_provider_or_db(source: str, method_name: str, *args):
+    provider = get_provider(source)
+    if provider and provider.available():
+        result = getattr(provider, method_name)(*args)
+        has_data = result and (
+            isinstance(result, list) and len(result) > 0
+            or isinstance(result, dict) and (
+                result.get("summary", {}).get("total_sessions", 0) > 0
+                or result.get("total", 0) > 0
+                or result.get("items") and len(result["items"]) > 0
+            )
+        )
+        if has_data:
+            return result
+    db_fallbacks = {
+        "get_dashboard_stats": _db_dashboard_stats,
+        "get_recent_sessions": _db_recent_sessions,
+        "list_projects": _db_list_projects,
+        "get_history": _db_get_history,
+    }
+    fallback = db_fallbacks.get(method_name)
+    if fallback:
+        return fallback(*args)
+    raise HTTPException(404, "Source not found/unavailable")
+
 
 @app.get("/api/{source}/stats")
 def get_source_stats(source: str):
@@ -471,12 +724,12 @@ def get_source_stats(source: str):
 
 @app.get("/api/{source}/dashboard-stats")
 def get_source_dashboard_stats(source: str, range: str = Query("30d", pattern="^(7d|30d|all)$")):
-    return call_provider(source, "get_dashboard_stats", range)
+    return _try_provider_or_db(source, "get_dashboard_stats", range)
 
 
 @app.get("/api/{source}/recent-sessions")
 def get_source_recent_sessions(source: str, limit: int = Query(5, ge=1, le=20)):
-    return call_provider(source, "get_recent_sessions", limit)
+    return _try_provider_or_db(source, "get_recent_sessions", limit)
 
 
 @app.get("/api/{source}/history")
@@ -487,12 +740,12 @@ def get_source_history(
     search: Optional[str] = Query(None),
     project: Optional[str] = Query(None),
 ):
-    return call_provider(source, "get_history", page, limit, search, project)
+    return _try_provider_or_db(source, "get_history", page, limit, search, project)
 
 
 @app.get("/api/{source}/projects")
 def get_source_projects(source: str):
-    return call_provider(source, "list_projects")
+    return _try_provider_or_db(source, "list_projects")
 
 
 @app.get("/api/{source}/projects/{project_id}")
@@ -532,8 +785,6 @@ def trigger_recap(date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$")):
     if not _llm_service:
         raise HTTPException(503, "LLM service not configured")
     provider = _get_claude_provider()
-    if not provider or not provider.available():
-        raise HTTPException(404, "Claude data not found")
     result = generate_recap(provider, date, _llm_service)
     if "error" in result:
         raise HTTPException(422, result["error"])
@@ -548,8 +799,6 @@ def get_recap_list():
 @app.get("/api/recap/calendar")
 def get_recap_calendar(months: int = Query(3, ge=1, le=12)):
     provider = _get_claude_provider()
-    if not provider or not provider.available():
-        return []
     return get_available_dates(provider, months)
 
 
