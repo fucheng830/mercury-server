@@ -10,6 +10,11 @@ _CST = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
 
+# recap→observation is deprecated for memory production (the durable-knowledge
+# extractor in hermes/extractor.py replaces it). Set MERCURY_WRITE_OBSERVATIONS=1
+# to restore the legacy behavior.
+_WRITE_OBSERVATIONS = os.environ.get("MERCURY_WRITE_OBSERVATIONS", "").lower() in ("1", "true", "yes")
+
 
 def run_server_recap(date: str = "", llm_service=None):
     """Generate a daily recap from sessions in the database, write results as memories."""
@@ -44,6 +49,10 @@ def run_server_recap(date: str = "", llm_service=None):
 
     memories = _call_llm(date, session_texts, llm_service)
     if not memories:
+        return []
+
+    if not _WRITE_OBSERVATIONS:
+        logger.info("Server recap: observation writes deprecated (extractor replaces this); %d memories not persisted.", len(memories))
         return []
 
     from hermes.memory_service import write_memory
@@ -123,6 +132,8 @@ def _parse_recap_result(data):
 
 def _simple_recap(date, texts):
     """Minimal recap without LLM — just stats."""
+    if not _WRITE_OBSERVATIONS:
+        return []
     from hermes.memory_service import write_memory
     content = f"Date: {date}\nTotal sessions: {len(texts)}\n\n" + "\n".join(f"- {t[:200]}" for t in texts[:30])
     r = write_memory(

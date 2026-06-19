@@ -518,6 +518,80 @@ def share_memory(memory_id: str, owner_namespace: str) -> bool:
     return check is not None and check["namespace"] == "shared"
 
 
+# ── Recall + reconciliation helpers (agent-first) ─────────────────────────
+
+def recall_memories(
+    project_path: str,
+    namespace: str = "claude",
+    limit: int = 30,
+    min_importance: int = 1,
+) -> List[Dict]:
+    """Return a project's active, injectable memories (Top N by importance).
+
+    Resolves the project by path OR name (lookup only — does not create).
+    Returns [] if the project is unknown or has no active memories.
+    """
+    proj = execute_one(
+        "SELECT id FROM projects WHERE path = %s OR name = %s LIMIT 1",
+        (project_path, project_path),
+    )
+    if proj is None:
+        return []
+    rows = execute(
+        f"SELECT {_MEM_COLUMNS} FROM memories "
+        "WHERE project_id = %s AND stage = 'memory' AND status = 'active' "
+        "AND namespace = %s AND importance >= %s "
+        "ORDER BY importance DESC, updated_at DESC LIMIT %s",
+        (proj["id"], namespace, min_importance, limit),
+        fetch=True,
+    )
+    return [_serialize_memory(r) for r in (rows or [])]
+
+
+def supersede_memory(memory_id: str, namespace: str = "claude") -> bool:
+    """Mark a memory superseded (replaced by a newer one). Not injected on recall."""
+    now = datetime.now(timezone.utc)
+    execute(
+        "UPDATE memories SET status = 'superseded', updated_at = %s "
+        "WHERE id = %s AND namespace = %s",
+        (now, memory_id, namespace),
+    )
+    row = execute_one(
+        "SELECT status FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    return row is not None and row["status"] == "superseded"
+
+
+def bump_memory(
+    memory_id: str,
+    content: Optional[str] = None,
+    importance: Optional[int] = None,
+    namespace: str = "claude",
+) -> Optional[Dict]:
+    """Reinforce an existing memory: recall_count+1, refresh updated_at,
+    optionally overwrite content and/or take the higher importance (merge)."""
+    now = datetime.now(timezone.utc)
+    sets = ["recall_count = recall_count + 1", "updated_at = %s"]
+    params: List[Any] = [now]
+    if content is not None:
+        sets.append("content = %s")
+        params.append(content)
+    if importance is not None:
+        sets.append("importance = GREATEST(importance, %s)")
+        params.append(importance)
+    params += [memory_id, namespace]
+    execute(
+        f"UPDATE memories SET {', '.join(sets)} WHERE id = %s AND namespace = %s",
+        tuple(params),
+    )
+    row = execute_one(
+        f"SELECT {_MEM_COLUMNS} FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    return _serialize_memory(dict(row)) if row else None
+
+
 # ── type_registry CRUD ────────────────────────────────────────────────────
 
 def list_types(enabled_only: bool = False) -> List[Dict]:

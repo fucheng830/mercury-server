@@ -39,9 +39,10 @@ def start_scheduler(provider, llm_service: LLMService):
 
         daily_cron = iter_config.get("daily_cron", "59 23 * * *").split()
         _scheduler.add_job(
-            _run_daily_ingestion, "cron",
+            _run_extract, "cron",
             hour=int(daily_cron[1]), minute=int(daily_cron[0]),
-            id="daily_ingestion", replace_existing=True,
+            args=[provider, llm_service],
+            id="daily_extract", replace_existing=True,
         )
         # DB-based recap (reads sessions table, not local files)
         _scheduler.add_job(
@@ -95,6 +96,18 @@ def _run_daily_recap(provider, llm_service: LLMService):
             logger.info(f"Recap generated for {today}")
     except Exception as e:
         logger.error(f"Scheduled recap failed: {e}")
+
+
+def _run_extract(provider, llm_service: LLMService):
+    """Job: extract durable project memories from today's sessions (replaces recap→observation)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    logger.info(f"Running memory extractor for {today}")
+    try:
+        from hermes.extractor import extract_for_date
+        result = extract_for_date(today, llm_service, provider)
+        logger.info(f"Extract for {today}: {result.get('total', {})}")
+    except Exception as e:
+        logger.error(f"Memory extract failed: {e}")
 
 
 def _run_db_recap(llm_service=None):

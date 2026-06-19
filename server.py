@@ -484,6 +484,43 @@ def memory_project_delete(project_id: str):
         raise HTTPException(503, f"Project delete error: {str(e)}")
 
 
+# ── Extract (capture) + Recall (inject) — agent-first ──────────────────────
+
+@app.post("/api/memory/extract")
+def memory_extract(body: dict = None):
+    """Run the durable-knowledge extractor for a date (across all projects that day)."""
+    try:
+        from hermes.extractor import extract_for_date
+        body = body or {}
+        date = body.get("date")
+        if not date:
+            from datetime import datetime as _dt
+            date = _dt.now().strftime("%Y-%m-%d")
+        if _llm_service is None:
+            raise HTTPException(503, "LLM service unavailable")
+        return extract_for_date(date, _llm_service, _get_claude_provider())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Extract error: {str(e)}")
+
+
+@app.get("/api/memory/recall")
+def memory_recall(
+    project: str = Query(...),
+    namespace: str = Query("claude"),
+    limit: int = Query(30, ge=1, le=100),
+    min_importance: int = Query(1, ge=1, le=5),
+):
+    """Return a project's active, injectable memories (for SessionStart injection)."""
+    try:
+        from hermes.memory_service import recall_memories
+        items = recall_memories(project, namespace=namespace, limit=limit, min_importance=min_importance)
+        return {"project": project, "count": len(items), "items": items}
+    except Exception as e:
+        raise HTTPException(503, f"Recall error: {str(e)}")
+
+
 # ── Recap Ingest API ─────────────────────────────────────────────────────────
 
 @app.post("/api/recap/ingest")
