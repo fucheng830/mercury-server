@@ -225,7 +225,14 @@ CREATE INDEX IF NOT EXISTS idx_memories_ns_stage ON memories(namespace, stage);
 CREATE INDEX IF NOT EXISTS idx_memories_updated  ON memories(updated_at DESC);
 
 -- ── hybrid_search v2 (multi-filter + pagination) ──────────────────────────
-DROP FUNCTION IF EXISTS hybrid_search;
+-- drop ALL hybrid_search overloads (prod may have legacy 5/6-arg variants)
+DO $$ DECLARE r record; BEGIN
+  FOR r IN SELECT p.oid::regprocedure FROM pg_proc p
+           JOIN pg_namespace n ON p.pronamespace=n.oid
+           WHERE p.proname='hybrid_search' AND n.nspname='public' LOOP
+    EXECUTE 'DROP FUNCTION IF EXISTS ' || r.oid::regprocedure;
+  END LOOP;
+END $$;
 CREATE FUNCTION hybrid_search(
     query_text        TEXT,
     query_embedding   vector(1024),
