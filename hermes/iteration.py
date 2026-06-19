@@ -22,35 +22,44 @@ logger = logging.getLogger(__name__)
 # System prompts (Chinese)
 # ---------------------------------------------------------------------------
 
-DEDUP_SYSTEM_PROMPT = """你是一个记忆提炼引擎。你的任务是分析近期的观察记忆（observations），进行去重、合并与提炼，产出候选记忆（candidates）等待人工确认。
+DEDUP_SYSTEM_PROMPT = """你是一个记忆提炼引擎。把多条原始观察记忆（observations）提炼成【少量高价值、具体、可复用】的候选记忆（candidates）。宁可少输出甚至不输出，也绝不产出空洞概括。
 
-对于每一组合并后的记忆，请：
-1. 生成一个简洁的摘要（summary）
-2. 评估重要性（1-5，5最重要）
-3. 提取 2-5 个标签（tags）
-4. 判断类型 type（NOTE/DISCOVERY/ARCH/DECISION/BUGFIX/PREFERENCE 之一）
-5. 记录合并了多少条原始记忆（source_count）
+【只提取这几类知识（不满足就别输出）】
+- DECISION 决策：做了什么选择 + 为什么（例："social-auto-upload 作为子模块通过 CLI/API 集成进万象平台，不直接嵌依赖，避免版本耦合"）
+- ARCH/CONVENTION 架构或约定：模块划分、接口契约、数据流、命名/分层规则（例："万象运营是 Python 3.12 FastAPI monorepo，多平台自媒体运营工具，分阶段实施"）
+- BUGFIX/GOTCHA 修复或坑：踩过的坑 + 根因 + 解法（例："代理管理批量导入曾因并发丢数据，已加分布式锁"）
+- PREFERENCE 偏好：用户/团队的稳定习惯（例："提交前必须跑 lint，不接受 warning"）
+- DISCOVERY 发现：具体的技术事实/数值/机制（例："bge-m3 在 0.13 Ollama 单次推理约 56s"）
 
-请严格按照以下 JSON 格式输出：
+【直接丢弃（放进 dropped 数组，不要硬凑成 candidate）】
+- 学习目标/主观状态："掌握了…/理解了…/熟悉了…"
+- 流水账/过程："推进了 Phase 3"、"今天做了 X、Y、Z"
+- 泛泛项目描述/意图："X 是个 React 前端"、"计划迁移…"
+- 不可复用的琐碎细节
+
+【写法要求】
+- 第三人称客观陈述句，带具体名词/数值/机制，不要主观词。
+- 一条记忆只讲一个点，1-2 句说清。
+- 内容相似/重复的观察合并成一条；互补细节拼进同一条。
+
+【严格按以下 JSON 格式输出】
 {
   "processed": [
     {
-      "content": "提炼后的完整内容",
-      "summary": "简洁摘要",
+      "content": "具体的事实/决策/坑（带关键细节）",
+      "summary": "≤20字摘要",
       "importance": 4,
       "tags": ["tag1", "tag2"],
       "type": "DECISION",
       "source_count": 3
     }
-  ]
+  ],
+  "dropped": ["被丢弃的观察概述（说明为什么没提炼成候选）"]
 }
 
-注意：
-- 内容相似或相关的观察应该合并
-- 保留所有重要细节，不要丢失关键信息
-- type 取值：NOTE=笔记、DISCOVERY=发现、ARCH=架构、DECISION=决策、BUGFIX=修复、PREFERENCE=偏好
-- importance 评估标准：1=琐碎，2=一般，3=有用，4=重要，5=关键
-- 如果所有观察都是独立的，每条单独输出即可"""
+importance：5=关键决策/严重坑，4=重要约定或事实，3=有用，2=边缘，1=琐碎
+type：DECISION=决策，ARCH=架构/约定，BUGFIX=修复/坑，PREFERENCE=偏好，DISCOVERY=发现，NOTE=其他具体笔记
+如果这批观察里没有高价值内容，processed 返回空数组，全部放进 dropped 并说明原因。"""
 
 ENTITY_EXTRACT_SYSTEM_PROMPT = """你是一个实体和关系提取引擎。你的任务是从知识条目中提取实体和关系。
 
