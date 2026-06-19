@@ -42,6 +42,20 @@
   - confidence=low → `stage=candidate`（暂不注入，待人工确认或 auto_promote）
 - **触发**：mercury CLI ingest session 时，服务端跑提取器（与 recap 生成并列；recap 作为复盘 UI 产物保留，**不再写 observation**）。
 
+### 3.1 对账（Reconciliation）—— 防重复 / 防冲突
+
+提取**不能孤立进行**，否则跨 session 会堆积重复记忆和矛盾记忆。提取器是**两步**：
+
+1. **抽取**：从本次 session 抽 5 类持久知识（上文的 EXTRACT_SYSTEM_PROMPT）。
+2. **对账**：把本次抽取结果 + 该项目**现有活跃记忆**（`stage=memory AND status=active`，按重要性取 Top ≤50 作上下文）一起喂给 LLM，对每条新抽取判定三选一：
+   - **duplicate**（与现有某条同义/重申）→ **不新建**，更新现有那条：`recall_count+1`、`updated_at=now`、importance 取较高、内容取更完整的（合并）。
+   - **supersede**（与现有矛盾/被取代，如"换库A→B"）→ 现有那条 `status='superseded'`，新条按置信度写入（高→memory / 低→candidate）。**`superseded` 不再被 recall 注入。**
+   - **new**（无对应）→ 新增（高置信→memory / 低→candidate）。
+
+新增 `RECONCILE_SYSTEM_PROMPT`（判定 duplicate/supersede/new + 给出被合并/被取代的现有记忆 id）。对账是 1 次额外 LLM 调用/会话；现有记忆上下文封顶 ≤50 条控成本。
+
+**效果**：同一项目的记忆始终保持**自洽**——不重复、不矛盾，旧结论被新结论取代时自动降级，agent 注入的永远是当前最该信的一组。`superseded`/`archived` 状态在 recall 时过滤掉。
+
 **废弃**：recap→observation 写入、iteration 的 observation→candidate 蒸馏（对新数据）。保留 `auto_promote`（高召回 candidate→memory）。
 
 提取 prompt 要点（新 `EXTRACT_SYSTEM_PROMPT`）：
