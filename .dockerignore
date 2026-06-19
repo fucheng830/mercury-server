@@ -9,3 +9,9 @@ web/node_modules/
 tests/
 *.md
 mercury-server-tmp/
+web/src/
+web/public/
+web/index.html
+web/package.json
+web/package-lock.json
+web/vite.config.js
