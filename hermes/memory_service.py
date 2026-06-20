@@ -616,12 +616,13 @@ def associate(
             (project, project),
         )
         if proj is None:
-            return []
+            return {"query": query, "hubs": names, "count": 0, "items": []}
         project_cond = " AND m.project_id = %s"
         proj_params = [proj["id"]]
 
+    mem_cols = ", ".join("m." + c.strip() for c in _MEM_COLUMNS.split(","))
     rows = execute(
-        f"""SELECT DISTINCT ON (m.id) {_MEM_COLUMNS} FROM memories m
+        f"""SELECT DISTINCT ON (m.id) {mem_cols} FROM memories m
             JOIN memory_entities me ON m.id = me.memory_id
             JOIN entities e ON me.entity_id = e.id
             WHERE e.name = ANY(%s) AND m.status = 'active' AND m.namespace = %s
