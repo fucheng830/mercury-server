@@ -283,6 +283,54 @@ NORMALIZE_SYSTEM_PROMPT = """你是概念实体规范化器。下面是一组概
 {"clusters":[{"canonical":"oauth","aliases":["oauth2","oauth 2.0"]}]}"""
 
 
+CONCEPT_BACKFILL_PROMPT = """你是概念提取器。下面是若干条知识记忆（带序号）。为每条提取 1-4 个它"关于什么"的核心概念名词（工具名/算法/技术/领域术语），小写规范名，能跨记忆复现。没有明确概念的给空数组，不要硬造。
+严格按 JSON 输出：
+{"results":[{"index":0,"concepts":["pgvector","rrf"]}]}"""
+
+
+def backfill_concepts(batch_size: int = 15) -> Dict[str, int]:
+    """One-shot: extract & link concept hubs for active memories that have none yet."""
+    from hermes.db import execute, execute_one
+    from hermes.graph_service import upsert_entity, link_memory_entity
+
+    rows = execute(
+        """SELECT m.id, m.content FROM memories m
+           WHERE m.stage = 'memory' AND m.status = 'active'
+             AND NOT EXISTS (SELECT 1 FROM memory_entities me WHERE me.memory_id = m.id)
+           ORDER BY m.created_at""",
+        fetch=True,
+    )
+    if not rows:
+        return {"processed": 0, "linked": 0, "new_entities": 0}
+
+    llm = LLMService(get_llm_config())
+    linked, new_entities, processed = 0, 0, 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        text = "\n".join(f"[{j}] {(r['content'] or '')[:500]}" for j, r in enumerate(batch))
+        try:
+            res = llm.generate_json(CONCEPT_BACKFILL_PROMPT, text, max_tokens=4096)
+        except Exception as e:
+            logger.warning("backfill batch %d failed: %s", i // batch_size, e)
+            continue
+        cmap = {x.get("index"): x.get("concepts", [])
+                for x in (res.get("results", []) if isinstance(res, dict) else [])}
+        for j, r in enumerate(batch):
+            processed += 1
+            concepts = [str(x).strip().lower() for x in cmap.get(j, []) if str(x).strip()][:6]
+            for c in concepts:
+                try:
+                    if execute_one("SELECT id FROM entities WHERE name = %s", (c,)) is None:
+                        upsert_entity(c, "concept")
+                        new_entities += 1
+                    link_memory_entity(r["id"], c)
+                    linked += 1
+                except Exception as e:
+                    logger.debug("backfill link '%s' failed: %s", c, e)
+    logger.info("backfill_concepts: processed=%d linked=%d new_entities=%d", processed, linked, new_entities)
+    return {"processed": processed, "linked": linked, "new_entities": new_entities}
+
+
 def _normalize_entities(llm) -> Dict[str, int]:
     """Cluster near-duplicate concept entity names and merge into canonical hubs.
 
