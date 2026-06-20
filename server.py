@@ -521,6 +521,25 @@ def memory_recall(
         raise HTTPException(503, f"Recall error: {str(e)}")
 
 
+@app.post("/api/memory/extract-corrections")
+def memory_extract_corrections(body: dict):
+    """Extract BUGFIX memories from raw error→fix episodes (full session content,
+    supplied by the client-side correction extractor that reads ~/.claude/ JSONL)."""
+    try:
+        from hermes.extractor import extract_corrections
+        if _llm_service is None:
+            raise HTTPException(503, "LLM service unavailable")
+        project_path = body.get("project_path") or body.get("project") or ""
+        episodes = body.get("episodes") or []
+        if not isinstance(episodes, list) or not episodes:
+            return {"project": project_path, "total": {"episodes": 0, "extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}}
+        return {"project": project_path, "total": extract_corrections(episodes, project_path, _llm_service)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Correction extract error: {str(e)}")
+
+
 # ── Recap Ingest API ─────────────────────────────────────────────────────────
 
 @app.post("/api/recap/ingest")

@@ -1,14 +1,14 @@
-"""Durable-knowledge extractor + reconciler (agent-first project memory).
+"""Durable-knowledge extractor + reconciler + correction-trajectory extractor.
 
-Replaces recap→observation→distill for memory production. Runs on the raw
-session content that aggregate_daily already loads, extracts ONLY the 5
-durable categories, then reconciles against the project's existing active
-memories (duplicate → merge, supersedes → retire old + add new, else new).
+Replaces recap→observation→distill for memory production.
+- extract_for_date: 5 durable categories from raw sessions (via aggregate_daily).
+- extract_corrections: BUGFIX memories from error→fix trajectories (raw episodes).
+Both reconcile against the project's existing active memories (duplicate/supersede/new)
+so memories stay self-consistent across sessions.
 
 See docs/superpowers/specs/2026-06-20-memory-system-agent-first-design.md
 """
 import logging
-import os
 from typing import Any, Dict, List
 
 from recap.llm_service import LLMService
@@ -33,6 +33,22 @@ EXTRACT_SYSTEM_PROMPT = """你是一个持久知识提取器。从下面的开�
 importance: 5=关键决策/严重坑, 4=重要约定或事实, 3=有用, 2=边缘, 1=琐碎
 type: DECISION / ARCH / BUGFIX / PREFERENCE / DISCOVERY"""
 
+CORRECTION_SYSTEM_PROMPT = """你是一个"纠错轨迹提取器"。下面是开发会话中 AI/开发者 碰到的若干错误及随后的排查与修正过程（原始片段）。
+请为【真正有复用价值】的错误提取一条持久的 BUGFIX 记忆。每条 content 必须包含三段：
+【坑】发生了什么错误（具体）
+【根因】为什么会错（真正的根因，不是表面现象）
+【正确做法】怎么改对的（可复用的解法/规避方式）
+
+type 固定为 BUGFIX。
+importance: 5=严重/高频/会造成数据丢失或部署失败的坑, 4=重要的坑, 3=一般
+confidence: high(根因和正确做法都明确) / low(根因不确定或修正未完成)
+
+只提取"别人下次也会踩、且有明确根因和解法"的坑。跳过：一次性环境小问题(命令拼错且无普遍意义)、无根因的随机失败、与项目领域无关的琐碎报错、已修复的拼写笔误。
+没有值得记的纠错就返回空 processed。
+
+严格按 JSON 输出：
+{"processed":[{"content":"【坑】...\\n【根因】...\\n【正确做法】...","type":"BUGFIX","importance":4,"confidence":"high","tags":["tag"]}]}"""
+
 RECONCILE_SYSTEM_PROMPT = """你是记忆对账器。给定若干【新提取的记忆】(带序号) 和该项目【现有活跃记忆】(带 id)，对每条新记忆判定其一：
 - new：现有没有同类，应新增。
 - duplicate_of：<id>：与现有某条同义/重申（结论一致），合并即可，不新建。
@@ -47,7 +63,7 @@ index 是新记忆的序号(从 0 开始)。"""
 
 
 def _project_name(project_path: str) -> str:
-    name = (project_path or "").rstrip("/").split("/")[-1]
+    name = (project_path or "").rstrip("/\\").replace("\\", "/").rstrip("/").split("/")[-1]
     return name or project_path or "unknown"
 
 
@@ -89,35 +105,17 @@ def _write_extracted(item: Dict, project_id: str, namespace: str) -> None:
         logger.warning("write extracted memory failed: %s", e)
 
 
-def extract_for_project(
-    sessions,
-    project_path: str,
-    llm: LLMService,
-    namespace: str = "claude",
+def _reconcile_and_write(
+    items: List[Dict], project_id: str, project_name: str, llm: LLMService, namespace: str = "claude",
 ) -> Dict[str, int]:
-    from hermes.memory_service import (
-        get_or_create_project, list_memories, bump_memory, supersede_memory,
-    )
+    """Reconcile extracted items against the project's existing active memories,
+    then apply: duplicate→bump, supersede→retire+add, new→add. Returns counts."""
+    from hermes.memory_service import list_memories, bump_memory, supersede_memory
 
-    text = _sessions_text_for_project(sessions)
-    counts = {"extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}
-    if len(text.strip()) < 40:
-        return counts
-
-    project_name = _project_name(project_path)
-    project_id = get_or_create_project(project_name, project_path, namespace)["id"]
-
-    try:
-        result = llm.generate_json(EXTRACT_SYSTEM_PROMPT, text, max_tokens=8192)
-    except Exception as e:
-        logger.warning("extract LLM failed for %s: %s", project_name, e)
-        return counts
-    items = result.get("processed", []) if isinstance(result, dict) else []
-    counts["extracted"] = len(items)
+    counts = {"extracted": len(items), "new": 0, "duplicates": 0, "superseded": 0}
     if not items:
         return counts
 
-    # Reconcile against existing active memories of this project.
     existing = list_memories(
         stage="memory", project_id=project_id, statuses=["active"], size=50,
     ).get("items", [])
@@ -165,6 +163,27 @@ def extract_for_project(
     return counts
 
 
+def extract_for_project(
+    sessions, project_path: str, llm: LLMService, namespace: str = "claude",
+) -> Dict[str, int]:
+    from hermes.memory_service import get_or_create_project
+
+    text = _sessions_text_for_project(sessions)
+    if len(text.strip()) < 40:
+        return {"extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}
+
+    project_name = _project_name(project_path)
+    project_id = get_or_create_project(project_name, project_path, namespace)["id"]
+
+    try:
+        result = llm.generate_json(EXTRACT_SYSTEM_PROMPT, text, max_tokens=8192)
+    except Exception as e:
+        logger.warning("extract LLM failed for %s: %s", project_name, e)
+        return {"extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}
+    items = result.get("processed", []) if isinstance(result, dict) else []
+    return _reconcile_and_write(items, project_id, project_name, llm, namespace)
+
+
 def extract_for_date(date: str, llm: LLMService, provider) -> Dict[str, Any]:
     """Extract durable memories for all sessions on a given date, grouped by project."""
     from recap.aggregator import aggregate_daily
@@ -186,3 +205,31 @@ def extract_for_date(date: str, llm: LLMService, provider) -> Dict[str, Any]:
             total[k] += r.get(k, 0)
     logger.info("extract_for_date(%s): %s projects, %s", date, len(by_project), total)
     return {"date": date, "projects": results, "total": total}
+
+
+def extract_corrections(
+    episodes: List[str], project_path: str, llm: LLMService, namespace: str = "claude",
+) -> Dict[str, int]:
+    """Extract BUGFIX memories from raw error→fix episodes (client-supplied, full content).
+
+    episodes: list of raw text windows, each = a failed action + error + the fix turns.
+    """
+    from hermes.memory_service import get_or_create_project
+
+    counts = {"episodes": len(episodes), "extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}
+    if not episodes:
+        return counts
+
+    project_name = _project_name(project_path)
+    project_id = get_or_create_project(project_name, project_path, namespace)["id"]
+
+    ep_text = "\n\n".join(f"### 错误片段 {i + 1}\n{e}" for i, e in enumerate(episodes))
+    try:
+        result = llm.generate_json(CORRECTION_SYSTEM_PROMPT, ep_text, max_tokens=8192)
+    except Exception as e:
+        logger.warning("correction extract LLM failed for %s: %s", project_name, e)
+        return counts
+    items = result.get("processed", []) if isinstance(result, dict) else []
+    applied = _reconcile_and_write(items, project_id, project_name, llm, namespace)
+    counts.update({k: applied.get(k, 0) for k in ("extracted", "new", "duplicates", "superseded")})
+    return counts
