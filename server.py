@@ -560,6 +560,26 @@ def memory_extract_sessions(body: dict):
         raise HTTPException(503, f"Session extract error: {str(e)}")
 
 
+# ── MCP (Streamable HTTP, stateless JSON-RPC) ───────────────────────────────
+
+@app.post("/mcp")
+async def mcp_post(request: Request):
+    from hermes.mcp_server import handle_mcp
+    return await handle_mcp(request)
+
+
+@app.get("/mcp")
+async def mcp_get():
+    from fastapi.responses import Response
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
+@app.delete("/mcp")
+async def mcp_delete():
+    from fastapi.responses import Response
+    return Response(status_code=200)
+
+
 # ── Recap Ingest API ─────────────────────────────────────────────────────────
 
 @app.post("/api/recap/ingest")
