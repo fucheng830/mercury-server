@@ -472,7 +472,7 @@ def get_memory_stats(namespace: str = "claude") -> Dict:
         """
         SELECT stage, COUNT(*) AS count,
                ROUND(AVG(importance)::numeric, 1) AS avg_importance
-        FROM memories WHERE namespace = %s
+        FROM memories WHERE namespace = %s AND status = 'active'
         GROUP BY stage
         """,
         (namespace,),
@@ -489,6 +489,10 @@ def get_memory_stats(namespace: str = "claude") -> Dict:
 
     entity_row = execute_one("SELECT COUNT(*) AS count FROM entities")
     relation_row = execute_one("SELECT COUNT(*) AS count FROM relations")
+    archived_row = execute_one(
+        "SELECT COUNT(*) AS count FROM memories WHERE namespace = %s AND status = 'archived'",
+        (namespace,),
+    )
 
     def _stage(name: str) -> Dict:
         return counts_by_stage.get(name, {"count": 0, "avg_importance": 0})
@@ -498,6 +502,7 @@ def get_memory_stats(namespace: str = "claude") -> Dict:
         "observation": _stage("observation"),
         "candidate": _stage("candidate"),
         "memory": _stage("memory"),
+        "archived": archived_row["count"] if archived_row else 0,
         "entities": entity_row["count"] if entity_row else 0,
         "relations": relation_row["count"] if relation_row else 0,
     }
