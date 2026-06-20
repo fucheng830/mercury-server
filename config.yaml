@@ -7,9 +7,9 @@ recap:
     default: "nvidia"
     providers:
       nvidia:
-        api_base: "https://integrate.api.nvidia.com/v1"
+        api_base: "http://192.168.0.17:3000/v1"
         api_key: "YOUR_NVIDIA_API_KEY"
-        model: "deepseek-ai/deepseek-v4-flash"
+        model: "auto"
         max_tokens: 2000
       nvidia-glm:
         api_base: "https://integrate.api.nvidia.com/v1"
