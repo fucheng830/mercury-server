@@ -64,6 +64,14 @@ def _stats() -> Dict[str, Any]:
     return get_memory_stats()
 
 
+def _associate(query: str, limit: int = 10, hops: int = 1,
+               cross_project: bool = True, min_importance: int = 1,
+               project: Optional[str] = None) -> Dict[str, Any]:
+    from hermes.memory_service import associate
+    return associate(query, limit=limit, hops=hops, cross_project=cross_project,
+                     min_importance=min_importance, project=project)
+
+
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "recall_memory",
@@ -121,6 +129,26 @@ TOOLS: List[Dict[str, Any]] = [
         "description": "Active/archived memory counts by stage (current namespace).",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "associate_memory",
+        "description": (
+            "Associative recall across the concept-hub graph: match the query to concept hubs, "
+            "return memories linked to them — crossing projects by default (knowledge compounding: "
+            "recall A and trigger B/C/D via shared concepts). Pull-based: call when a concept/problem "
+            "surfaces, unlike recall_memory (project push)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "concept / problem to associate on"},
+                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
+                "hops": {"type": "integer", "default": 1, "minimum": 1, "maximum": 2},
+                "cross_project": {"type": "boolean", "default": True},
+                "project": {"type": "string", "description": "if cross_project=false, restrict to this project path/name"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 _HANDLERS: Dict[str, Callable[..., Dict[str, Any]]] = {
@@ -129,6 +157,7 @@ _HANDLERS: Dict[str, Callable[..., Dict[str, Any]]] = {
     "read_memory": _read,
     "list_memory": _list,
     "memory_stats": _stats,
+    "associate_memory": _associate,
 }
 
 

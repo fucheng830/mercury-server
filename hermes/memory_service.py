@@ -555,6 +555,86 @@ def recall_memories(
     return [_serialize_memory(r) for r in (rows or [])]
 
 
+def associate(
+    query: str,
+    limit: int = 10,
+    hops: int = 1,
+    cross_project: bool = True,
+    min_importance: int = 1,
+    project: Optional[str] = None,
+    namespace: str = "claude",
+    top_k_entities: int = 5,
+) -> Dict[str, Any]:
+    """Associative recall: query -> matching concept hubs -> linked memories.
+
+    Pull-based retrieval (triggered by the current problem): embed the query, match the
+    top-k global concept entities by similarity, return active memories linked to them —
+    crossing projects by default (cross-disciplinary compounding). hops>=2 also expands to
+    entities related to the matched ones via the relations table.
+    """
+    try:
+        from hermes.embedding import generate_embedding
+        vec = np.array(generate_embedding(query), dtype=np.float32)
+    except Exception:
+        logger.warning("associate: embedding failed for query")
+        return []
+
+    conn = get_conn()
+    try:
+        from pgvector.psycopg2 import register_vector
+        register_vector(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT e.name FROM entities e
+                   WHERE e.embedding IS NOT NULL
+                   ORDER BY e.embedding <-> %s::vector LIMIT %s""",
+                (vec, top_k_entities),
+            )
+            names = [r["name"] for r in cur.fetchall()]
+    finally:
+        put_conn(conn)
+
+    if not names:
+        return []
+
+    if hops >= 2:
+        extra = execute(
+            """SELECT DISTINCT CASE WHEN source_id = e.id THEN te.name ELSE se.name END AS name
+               FROM relations r
+               JOIN entities e ON e.name = ANY(%s)
+               JOIN entities se ON r.source_id = se.id
+               JOIN entities te ON r.target_id = te.id
+               WHERE r.source_id = e.id OR r.target_id = e.id""",
+            (names,), fetch=True,
+        )
+        names = list({n for n in names + [r["name"] for r in (extra or [])]})
+
+    project_cond, proj_params = "", []
+    if not cross_project and project:
+        proj = execute_one(
+            "SELECT id FROM projects WHERE path = %s OR name = %s LIMIT 1",
+            (project, project),
+        )
+        if proj is None:
+            return []
+        project_cond = " AND m.project_id = %s"
+        proj_params = [proj["id"]]
+
+    rows = execute(
+        f"""SELECT DISTINCT ON (m.id) {_MEM_COLUMNS} FROM memories m
+            JOIN memory_entities me ON m.id = me.memory_id
+            JOIN entities e ON me.entity_id = e.id
+            WHERE e.name = ANY(%s) AND m.status = 'active' AND m.namespace = %s
+                  AND m.importance >= %s{project_cond}
+            ORDER BY m.id, m.importance DESC, m.updated_at DESC
+            LIMIT %s""",
+        [names, namespace, min_importance] + proj_params + [limit],
+        fetch=True,
+    )
+    items = [_serialize_memory(r) for r in (rows or [])]
+    return [{"query": query, "hubs": names, "count": len(items), "items": items}]
+
+
 def supersede_memory(memory_id: str, namespace: str = "claude") -> bool:
     """Mark a memory superseded (replaced by a newer one). Not injected on recall."""
     now = datetime.now(timezone.utc)

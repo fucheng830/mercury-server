@@ -24,12 +24,13 @@ EXTRACT_SYSTEM_PROMPT = """你是一个持久知识提取器。从下面的开�
 
 每条要具体（带理由/根因/路径/数值），第三人称客观陈述，1-2 句，一条只讲一个点。
 每条给 confidence: high(明确、可复用、有把握) / low(存疑、推测、待确认)。
+每条必须给 concepts：1-4 个该知识"关于什么"的核心概念名词（工具名/算法/技术/领域术语），小写、用规范名（如 pgvector、oauth、rrf、celery），能跨其他记忆复现——用于把这条知识挂到全局概念枢纽上。
 
 禁止提取：过程流水账("推进了X"、"今天做了")、学习态("掌握了/理解了")、泛项目描述、一次性任务意图、不可复用的琐碎。
 没有持久知识就返回空 processed。
 
 严格按 JSON 输出：
-{"processed":[{"content":"具体的事实/决策/坑","type":"DECISION","importance":4,"confidence":"high","tags":["tag"]}]}
+{"processed":[{"content":"具体的事实/决策/坑","type":"DECISION","importance":4,"confidence":"high","tags":["tag"],"concepts":["pgvector","rrf"]}]}
 importance: 5=关键决策/严重坑, 4=重要约定或事实, 3=有用, 2=边缘, 1=琐碎
 type: DECISION / ARCH / BUGFIX / PREFERENCE / DISCOVERY"""
 
@@ -85,12 +86,32 @@ def _sessions_text_for_project(sessions) -> str:
     return "\n".join(parts)
 
 
+def _link_concepts(memory_id: str, concepts, tags=None) -> None:
+    """Link a memory to its concept-hub entities (creates+embeds new entities only)."""
+    if not memory_id:
+        return
+    from hermes.db import execute_one
+    from hermes.graph_service import upsert_entity, link_memory_entity
+
+    names = [str(c).strip().lower() for c in (concepts or []) if str(c).strip()]
+    if not names and tags:
+        names = [str(t).strip().lower() for t in tags if str(t).strip()]
+    for name in names[:6]:
+        try:
+            existing = execute_one("SELECT id FROM entities WHERE name = %s", (name,))
+            if existing is None:
+                upsert_entity(name, "concept")  # embeds once, on first creation
+            link_memory_entity(memory_id, name)
+        except Exception as e:
+            logger.warning("link concept '%s' failed: %s", name, e)
+
+
 def _write_extracted(item: Dict, project_id: str, namespace: str) -> None:
     from hermes.memory_service import write_memory
     conf = (item.get("confidence") or "low").lower()
     stage = "memory" if conf == "high" else "candidate"
     try:
-        write_memory(
+        mem = write_memory(
             content=item.get("content", ""),
             stage=stage,
             source="extractor",
@@ -103,6 +124,8 @@ def _write_extracted(item: Dict, project_id: str, namespace: str) -> None:
         )
     except Exception as e:
         logger.warning("write extracted memory failed: %s", e)
+        return
+    _link_concepts(mem.get("id"), item.get("concepts"), item.get("tags"))
 
 
 def _reconcile_and_write(

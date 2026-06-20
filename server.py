@@ -521,6 +521,28 @@ def memory_recall(
         raise HTTPException(503, f"Recall error: {str(e)}")
 
 
+@app.post("/api/memory/associate")
+def memory_associate(body: dict):
+    """Associative recall across the concept-hub graph (cross-project by default)."""
+    try:
+        from hermes.memory_service import associate
+        query = body.get("query", "")
+        if not query:
+            raise HTTPException(400, "query required")
+        return associate(
+            query,
+            limit=body.get("limit", 10),
+            hops=body.get("hops", 1),
+            cross_project=body.get("cross_project", True),
+            min_importance=body.get("min_importance", 1),
+            project=body.get("project"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Associate error: {str(e)}")
+
+
 @app.post("/api/memory/extract-corrections")
 def memory_extract_corrections(body: dict):
     """Extract BUGFIX memories from raw error→fix episodes (full session content,

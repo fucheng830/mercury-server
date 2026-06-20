@@ -276,6 +276,73 @@ def run_weekly_core_review() -> Dict[str, Any]:
 # Monthly graph maintenance
 # ---------------------------------------------------------------------------
 
+NORMALIZE_SYSTEM_PROMPT = """你是概念实体规范化器。下面是一组概念实体名。把【真正指同一概念】的别名归为一组，选一个规范名(canonical)。
+只合并确属同义的（如 OAuth2 / OAuth 2.0 / oauth-2；pgvector / pg-vector）。不要硬合不同概念（celery 和 celery-beat 相关但不同，别合；redis 和 redis-cluster 也别合）。
+没有同义组的就不要输出该组。
+严格按 JSON 输出：
+{"clusters":[{"canonical":"oauth","aliases":["oauth2","oauth 2.0"]}]}"""
+
+
+def _normalize_entities(llm) -> Dict[str, int]:
+    """Cluster near-duplicate concept entity names and merge into canonical hubs.
+
+    Prevents hub fragmentation (OAuth2 / OAuth 2.0 fragmenting the same concept),
+    which would break transitive association across memories.
+    """
+    from hermes.db import execute, execute_one
+
+    rows = execute(
+        "SELECT id, name FROM entities WHERE entity_type = 'concept' ORDER BY name",
+        fetch=True,
+    )
+    if len(rows) < 2:
+        return {"entities_scanned": len(rows), "merged": 0}
+    names = [r["name"] for r in rows]
+    try:
+        result = llm.generate_json(
+            NORMALIZE_SYSTEM_PROMPT,
+            "概念实体名列表：\n" + json.dumps(names, ensure_ascii=False),
+            max_tokens=4096,
+        )
+    except Exception as e:
+        logger.warning("entity normalize LLM failed: %s", e)
+        return {"entities_scanned": len(rows), "merged": 0, "error": str(e)}
+
+    id_by_name = {r["name"]: r["id"] for r in rows}
+    merged = 0
+    for cluster in (result.get("clusters", []) if isinstance(result, dict) else []):
+        canonical = (cluster.get("canonical") or "").strip().lower()
+        aliases = [a.strip().lower() for a in (cluster.get("aliases") or [])
+                   if a.strip().lower() and a.strip().lower() != canonical]
+        if not canonical or not aliases:
+            continue
+        canon_id = id_by_name.get(canonical)
+        if canon_id is None:
+            from hermes.graph_service import upsert_entity
+            try:
+                upsert_entity(canonical, "concept")
+            except Exception:
+                continue
+            row = execute_one("SELECT id FROM entities WHERE name = %s", (canonical,))
+            canon_id = row["id"] if row else None
+        if canon_id is None:
+            continue
+        for alias in aliases:
+            aid = id_by_name.get(alias)
+            if not aid or aid == canon_id:
+                continue
+            execute(
+                "UPDATE memory_entities SET entity_id = %s "
+                "WHERE entity_id = %s AND memory_id NOT IN "
+                "(SELECT memory_id FROM memory_entities WHERE entity_id = %s)",
+                (canon_id, aid, canon_id),
+            )
+            execute("DELETE FROM memory_entities WHERE entity_id = %s", (aid,))
+            execute("DELETE FROM entities WHERE id = %s", (aid,))
+            merged += 1
+    return {"entities_scanned": len(rows), "merged": merged}
+
+
 def run_monthly_graph_maintenance() -> Dict[str, Any]:
     """Run monthly graph maintenance: extract entities and relations, cleanup.
 
@@ -357,12 +424,19 @@ def run_monthly_graph_maintenance() -> Dict[str, Any]:
         logger.warning("Failed to cleanup expired: %s", e)
         expired = 0
 
-    logger.info("Monthly graph maintenance: entities=%d, relations=%d, expired=%d",
-                entities_created, relations_created, expired)
+    try:
+        norm = _normalize_entities(LLMService(get_llm_config()))
+    except Exception as e:
+        logger.warning("Entity normalization failed: %s", e)
+        norm = {"merged": 0}
+
+    logger.info("Monthly graph maintenance: entities=%d, relations=%d, expired=%d, merged=%d",
+                entities_created, relations_created, expired, norm.get("merged", 0))
 
     return {
         "status": "ok",
         "entities": entities_created,
         "relations": relations_created,
         "expired_cleaned": expired,
+        "entities_merged": norm.get("merged", 0),
     }
