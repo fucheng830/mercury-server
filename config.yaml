@@ -36,7 +36,7 @@ hermes:
     database: "hermes_memory"
     user: "hermes"
     password: "your_db_password"
-    pool_size: 5
+    pool_size: 20
   embedding:
     api_base: "http://YOUR_OLLAMA_HOST:11434"
     model: "bge-m3"
