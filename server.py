@@ -540,6 +540,26 @@ def memory_extract_corrections(body: dict):
         raise HTTPException(503, f"Correction extract error: {str(e)}")
 
 
+@app.post("/api/memory/extract-sessions")
+def memory_extract_sessions(body: dict):
+    """Extract durable memories from client-supplied FULL session content (JSONL summaries).
+    Client reads local ~/.claude/projects/*/*.jsonl and ships session summaries the server
+    DB lacks (server stores only shallow previews). Body: {project_path, sessions:[...]}."""
+    try:
+        from hermes.extractor import extract_from_sessions
+        if _llm_service is None:
+            raise HTTPException(503, "LLM service unavailable")
+        project_path = body.get("project_path") or body.get("project") or ""
+        sessions = body.get("sessions") or []
+        if not isinstance(sessions, list) or not sessions:
+            return {"project": project_path, "total": {"extracted": 0, "new": 0, "duplicates": 0, "superseded": 0}}
+        return {"project": project_path, "total": extract_from_sessions(sessions, project_path, _llm_service)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Session extract error: {str(e)}")
+
+
 # ── Recap Ingest API ─────────────────────────────────────────────────────────
 
 @app.post("/api/recap/ingest")

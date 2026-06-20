@@ -184,6 +184,32 @@ def extract_for_project(
     return _reconcile_and_write(items, project_id, project_name, llm, namespace)
 
 
+def extract_from_sessions(
+    sessions_data: List[Dict], project_path: str, llm: LLMService, namespace: str = "claude",
+) -> Dict[str, int]:
+    """Extract durable memories from client-supplied FULL session summaries (JSON).
+
+    Each item: {user_prompts, assistant_summaries, tools_used, project}. The client reads
+    the local ~/.claude/projects/*/*.jsonl (full content the server's DB lacks — it only
+    stores shallow previews) and ships substantive batches. Thin wrapper over
+    extract_for_project; the client controls batch size per request.
+    """
+    from recap.aggregator import SessionSummary
+
+    summaries: List[Any] = []
+    for d in sessions_data or []:
+        if not isinstance(d, dict):
+            continue
+        summaries.append(SessionSummary(
+            session_id="", project=d.get("project") or project_path,
+            start_time="", end_time="", model="", token_usage={},
+            user_prompts=d.get("user_prompts", []) or [],
+            assistant_summaries=d.get("assistant_summaries", []) or [],
+            tools_used=d.get("tools_used", {}) or {},
+        ))
+    return extract_for_project(summaries, project_path, llm, namespace)
+
+
 def extract_for_date(date: str, llm: LLMService, provider) -> Dict[str, Any]:
     """Extract durable memories for all sessions on a given date, grouped by project."""
     from recap.aggregator import aggregate_daily
