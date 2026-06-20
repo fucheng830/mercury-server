@@ -21,17 +21,10 @@ def start_scheduler(provider, llm_service: LLMService):
         logger.info("Recap scheduler disabled")
         return
 
-    cron_parts = config.get("cron", "0 23 * * *").split()
     _scheduler = BackgroundScheduler(timezone=config.get("timezone", "Asia/Shanghai"))
-    _scheduler.add_job(
-        _run_daily_recap,
-        "cron",
-        hour=int(cron_parts[1]),
-        minute=int(cron_parts[0]),
-        args=[provider, llm_service],
-        id="daily_recap",
-        replace_existing=True,
-    )
+    # The legacy daily_recap (recap-file generation) and db_recap (observation
+    # writing) jobs are RETIRED — the durable-knowledge extractor (_run_extract /
+    # extract_for_date) replaced them. recap_engine/server_recap stay for manual use.
     # Memory iteration jobs
     try:
         from recap_config import get_iteration_config
@@ -43,13 +36,6 @@ def start_scheduler(provider, llm_service: LLMService):
             hour=int(daily_cron[1]), minute=int(daily_cron[0]),
             args=[provider, llm_service],
             id="daily_extract", replace_existing=True,
-        )
-        # DB-based recap (reads sessions table, not local files)
-        _scheduler.add_job(
-            _run_db_recap, "cron",
-            hour=0, minute=5,
-            args=[llm_service],
-            id="db_recap", replace_existing=True,
         )
 
         weekly_cron = iter_config.get("weekly_cron", "0 1 * * 0").split()

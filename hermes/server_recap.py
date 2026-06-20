@@ -1,4 +1,10 @@
-"""Server-side daily recap from sessions table (reads PostgreSQL, not local files)."""
+"""Server-side daily recap from sessions table (reads PostgreSQL, not local files).
+
+DEPRECATED for automatic memory production: the scheduler no longer runs this
+(db_recap job removed). The durable-knowledge extractor (hermes/extractor.py,
+extract_for_date / daily_extract job) replaced it. Kept for manual use via the
+/api/recap/* endpoints. Observation writes are gated behind MERCURY_WRITE_OBSERVATIONS.
+"""
 import json
 import logging
 import os

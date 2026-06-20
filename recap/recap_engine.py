@@ -1,4 +1,9 @@
-"""Daily recap generation engine."""
+"""Daily recap generation engine.
+
+DEPRECATED for automatic memory production: the scheduler no longer runs the
+daily_recap job. The durable-knowledge extractor (hermes/extractor.py) replaced
+the recap->observation pipeline. Kept for manual use via /api/recap/generate.
+"""
 import json
 import logging
 import os
