@@ -9,7 +9,8 @@ Hermes 记忆系统——**全栈仓库**（FastAPI 后端 + Vue3 前端源码 +
 python server.py --port 8788 --shared
 
 # 后端测试
-python -m pytest tests/ -q
+python -m pytest tests/ -q                      # 纯逻辑测试（无需 DB）
+MERCURY_TEST_DB=hermes_test python -m pytest tests/ -q   # 含 DB 集成（需一次性建库+vector扩展）
 
 # 前端开发（web/，端口 5180，代理 /api → 本地 8788）
 cd web && npm run dev
