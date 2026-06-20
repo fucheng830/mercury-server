@@ -273,6 +273,8 @@ def search_memories(
     """
     if namespaces is None:
         namespaces = ["claude"]
+    if statuses is None:
+        statuses = ["active"]
 
     embedding_vec = None
     try:
