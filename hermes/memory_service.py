@@ -633,7 +633,7 @@ def associate(
         fetch=True,
     )
     items = [_serialize_memory(r) for r in (rows or [])]
-    return [{"query": query, "hubs": names, "count": len(items), "items": items}]
+    return {"query": query, "hubs": names, "count": len(items), "items": items}
 
 
 def supersede_memory(memory_id: str, namespace: str = "claude") -> bool:
