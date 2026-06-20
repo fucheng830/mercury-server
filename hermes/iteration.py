@@ -331,32 +331,10 @@ def backfill_concepts(batch_size: int = 15) -> Dict[str, int]:
     return {"processed": processed, "linked": linked, "new_entities": new_entities}
 
 
-def _normalize_entities(llm) -> Dict[str, int]:
-    """Cluster near-duplicate concept entity names and merge into canonical hubs.
-
-    Prevents hub fragmentation (OAuth2 / OAuth 2.0 fragmenting the same concept),
-    which would break transitive association across memories.
-    """
+def _apply_normalize_clusters(result, id_by_name: Dict[str, str]) -> int:
+    """Merge one LLM clustering result into canonical hubs. Returns merge count."""
     from hermes.db import execute, execute_one
 
-    rows = execute(
-        "SELECT id, name FROM entities WHERE entity_type = 'concept' ORDER BY name",
-        fetch=True,
-    )
-    if len(rows) < 2:
-        return {"entities_scanned": len(rows), "merged": 0}
-    names = [r["name"] for r in rows]
-    try:
-        result = llm.generate_json(
-            NORMALIZE_SYSTEM_PROMPT,
-            "概念实体名列表：\n" + json.dumps(names, ensure_ascii=False),
-            max_tokens=4096,
-        )
-    except Exception as e:
-        logger.warning("entity normalize LLM failed: %s", e)
-        return {"entities_scanned": len(rows), "merged": 0, "error": str(e)}
-
-    id_by_name = {r["name"]: r["id"] for r in rows}
     merged = 0
     for cluster in (result.get("clusters", []) if isinstance(result, dict) else []):
         canonical = (cluster.get("canonical") or "").strip().lower()
@@ -373,6 +351,8 @@ def _normalize_entities(llm) -> Dict[str, int]:
                 continue
             row = execute_one("SELECT id FROM entities WHERE name = %s", (canonical,))
             canon_id = row["id"] if row else None
+            if canon_id:
+                id_by_name[canonical] = canon_id
         if canon_id is None:
             continue
         for alias in aliases:
@@ -388,6 +368,42 @@ def _normalize_entities(llm) -> Dict[str, int]:
             execute("DELETE FROM memory_entities WHERE entity_id = %s", (aid,))
             execute("DELETE FROM entities WHERE id = %s", (aid,))
             merged += 1
+    return merged
+
+
+def _normalize_entities(llm, chunk_size: int = 100) -> Dict[str, int]:
+    """Cluster near-duplicate concept entity names and merge into canonical hubs.
+
+    Prevents hub fragmentation (OAuth2 / OAuth 2.0 fragmenting the same concept),
+    which would break transitive association across memories. Names are sorted then
+    chunked so near-synonyms (often alphabetically adjacent) land in the same batch,
+    and each LLM call's output stays within token limits.
+    """
+    from hermes.db import execute
+
+    rows = execute(
+        "SELECT id, name FROM entities WHERE entity_type = 'concept' ORDER BY name",
+        fetch=True,
+    )
+    if len(rows) < 2:
+        return {"entities_scanned": len(rows), "merged": 0}
+
+    id_by_name = {r["name"]: r["id"] for r in rows}
+    all_names = [r["name"] for r in rows]
+    merged = 0
+    for i in range(0, len(all_names), chunk_size):
+        chunk = all_names[i:i + chunk_size]
+        try:
+            result = llm.generate_json(
+                NORMALIZE_SYSTEM_PROMPT,
+                "概念实体名列表：\n" + json.dumps(chunk, ensure_ascii=False),
+                max_tokens=8192,
+            )
+        except Exception as e:
+            logger.warning("entity normalize chunk %d failed: %s", i // chunk_size, e)
+            continue
+        merged += _apply_normalize_clusters(result, id_by_name)
+    logger.info("normalize_entities: scanned=%d merged=%d", len(rows), merged)
     return {"entities_scanned": len(rows), "merged": merged}
 
 
