@@ -24,7 +24,7 @@ def ingest_register(body: dict):
 def ingest_sessions_route(body: dict):
     try:
         from hermes.ingest_service import ingest_sessions as _ingest
-        return _ingest(body.get("client_id", ""), body.get("sessions", []), body.get("sync_log", []))
+        return _ingest(body.get("client_id", ""), body.get("sessions") or [], body.get("sync_log") or [])
     except Exception as e:
         logging.getLogger(__name__).exception("Session ingest error")
         raise HTTPException(500, f"Session ingest error: {str(e)}")
