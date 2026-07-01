@@ -87,6 +87,7 @@ def init_db() -> None:
     total = 0
     failed = 0
     try:
+        conn.rollback()  # clear any pending txn left by a previous failed init
         conn.autocommit = True
         with conn.cursor() as cur:
             for stmt in _split_schema_statements(sql):
