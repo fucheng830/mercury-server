@@ -47,18 +47,58 @@ def put_conn(conn):
         _pool.putconn(conn)
 
 
+def _split_schema_statements(sql: str) -> List[str]:
+    """Split SQL into statements on ';', respecting $$ ... $$ dollar-quoted blocks.
+
+    psycopg2's execute() runs multi-statement SQL as one simple query, where a
+    single ERROR aborts the rest. Schema migrations must be resilient: one
+    failing statement (e.g. CREATE UNIQUE INDEX hitting duplicate keys) must
+    not block later ones. We split into individual statements (keeping DO $$
+    ... $$ blocks intact) so init_db can run each independently.
+    """
+    statements: List[str] = []
+    buf: List[str] = []
+    in_dollar = False
+    for line in sql.splitlines():
+        if line.count("$$") % 2 == 1:
+            in_dollar = not in_dollar
+        buf.append(line)
+        if not in_dollar and line.strip().endswith(";"):
+            statements.append("\n".join(buf))
+            buf = []
+    tail = "\n".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return [s for s in statements if s.strip()]
+
+
 def init_db() -> None:
-    """Run schema.sql to create tables and indexes."""
+    """Run schema.sql statement-by-statement so one failure doesn't block the rest.
+
+    Each statement runs in autocommit mode; a failing statement is logged and
+    skipped (e.g. CREATE UNIQUE INDEX on a table with pre-existing duplicates),
+    so subsequent migrations still apply. Callers should verify expected
+    columns/indexes exist after startup — a WARNING here does not stop the server.
+    """
     init_pool()
     schema_path = Path(__file__).parent / "schema.sql"
     sql = schema_path.read_text(encoding="utf-8")
     conn = get_conn()
+    total = 0
+    failed = 0
     try:
+        conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.commit()
-        logger.info("Database schema initialized")
+            for stmt in _split_schema_statements(sql):
+                total += 1
+                try:
+                    cur.execute(stmt)
+                except Exception as e:
+                    failed += 1
+                    logger.warning("Schema statement failed (continuing): %s", e)
+        logger.info("Database schema initialized (%d statements, %d failed)", total, failed)
     finally:
+        conn.autocommit = False
         put_conn(conn)
 
 
