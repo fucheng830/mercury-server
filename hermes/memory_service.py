@@ -636,14 +636,27 @@ def associate(
     return {"query": query, "hubs": names, "count": len(items), "items": items}
 
 
-def supersede_memory(memory_id: str, namespace: str = "claude") -> bool:
-    """Mark a memory superseded (replaced by a newer one). Not injected on recall."""
+def supersede_memory(memory_id: str, superseded_by: Optional[str] = None, namespace: str = "claude") -> bool:
+    """Mark a memory superseded (replaced by a newer one). Not injected on recall.
+
+    Closes the bi-temporal validity interval (valid_to=now) and optionally
+    links the replacing memory via superseded_by. Status filter alone still
+    excludes it from active recall; valid_to records when it stopped being
+    current (enables future as-of-time queries).
+    """
     now = datetime.now(timezone.utc)
-    execute(
-        "UPDATE memories SET status = 'superseded', updated_at = %s "
-        "WHERE id = %s AND namespace = %s",
-        (now, memory_id, namespace),
-    )
+    if superseded_by:
+        execute(
+            "UPDATE memories SET status = 'superseded', valid_to = %s, superseded_by = %s, updated_at = %s "
+            "WHERE id = %s AND namespace = %s",
+            (now, superseded_by, now, memory_id, namespace),
+        )
+    else:
+        execute(
+            "UPDATE memories SET status = 'superseded', valid_to = %s, updated_at = %s "
+            "WHERE id = %s AND namespace = %s",
+            (now, now, memory_id, namespace),
+        )
     row = execute_one(
         "SELECT status FROM memories WHERE id = %s AND namespace = %s",
         (memory_id, namespace),
@@ -742,7 +755,7 @@ def get_or_create_project(name: str, path: Optional[str] = None,
         """
         INSERT INTO projects (name, path, namespace)
         VALUES (%s, %s, %s)
-        ON CONFLICT (namespace, name) DO UPDATE SET path = EXCLUDED.path
+        ON CONFLICT (namespace, path) DO UPDATE SET name = EXCLUDED.name
         RETURNING id, name, path, namespace, created_at, updated_at
         """,
         (name, path, namespace),

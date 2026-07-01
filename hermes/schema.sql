@@ -150,8 +150,7 @@ CREATE TABLE IF NOT EXISTS projects (
     path       TEXT,
     namespace  VARCHAR(50) NOT NULL DEFAULT 'claude',
     created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(namespace, name)
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ── type_registry (extensible memory-type enum) ───────────────────────────
@@ -303,3 +302,33 @@ $$ LANGUAGE plpgsql;
 DROP INDEX IF EXISTS idx_memories_layer;
 DROP INDEX IF EXISTS idx_memories_ns_layer;
 ALTER TABLE memories DROP COLUMN IF EXISTS layer;
+
+
+-- ── projects: key by (namespace, path) instead of name (idempotent migration) ──
+-- Different machines same-named folders (.../scripts, .../backend) are distinct
+-- projects; the cwd (path) is the true identity, not the last path segment.
+DO $$ BEGIN
+  ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_namespace_name_key;
+EXCEPTION WHEN OTHERS THEN END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_namespace_path ON projects(namespace, path);
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Bi-temporal ledger (MemStrata-inspired, 2026-06-30)
+-- valid_from/valid_to: interval during which a fact is current.
+-- superseded_by: link to the replacing memory. supersede_memory() closes
+-- valid_to and links superseded_by. Active retrieval still filters via
+-- status='active' (equivalent: superseded rows have valid_to set). The time
+-- interval is recorded to enable future as-of-time queries ("what was X before
+-- the refactor"). See docs: arXiv:2606.26511 §4.2.
+-- ════════════════════════════════════════════════════════════════════════
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS valid_from   TIMESTAMPTZ DEFAULT now();
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS valid_to     TIMESTAMPTZ;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_by UUID;
+
+-- backfill existing rows: valid_from = created_at; already-superseded rows
+-- close valid_to at updated_at (when the supersede happened).
+UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL;
+UPDATE memories SET valid_to = updated_at WHERE status = 'superseded' AND valid_to IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_memories_valid_on    ON memories(valid_to) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by) WHERE superseded_by IS NOT NULL;
