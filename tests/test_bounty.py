@@ -145,3 +145,47 @@ def test_answer_not_claimer_fails(db):
     bid = str(bounty["id"])
     claim_bounty(bid, solver)
     assert answer_bounty(bid, "wrong", other) is None
+
+
+# ── C2-2: expiry / refund ─────────────────────────────────────────────────
+
+def test_expire_open_full_refund(db):
+    """open bounty (no claim) expired → 100% refund; creator not at fault."""
+    from hermes.bounty_service import create_bounty, expire_bounties, get_balance
+    from hermes.db import execute
+    creator = _ns()
+    bounty = create_bounty("Q", 50, creator)
+    execute("UPDATE bounties SET expires_at = now() - interval '1 hour' WHERE id = %s",
+            (str(bounty["id"]),))
+    result = expire_bounties()
+    assert result["expired"] >= 1
+    assert get_balance(creator) == 100  # full refund (50 escrowed + 50 back)
+
+
+def test_expire_answered_80_refund(db):
+    """answered bounty (no accept) expired → 80% refund; creator didn't judge in time."""
+    from hermes.bounty_service import (
+        create_bounty, claim_bounty, answer_bounty, expire_bounties, get_balance,
+    )
+    from hermes.db import execute
+    creator, solver = _ns(), _ns()
+    bounty = create_bounty("Q", 50, creator)
+    bid = str(bounty["id"])
+    claim_bounty(bid, solver)
+    answer_bounty(bid, "ans", solver)
+    execute("UPDATE bounties SET expires_at = now() - interval '1 hour' WHERE id = %s", (bid,))
+    expire_bounties()
+    assert get_balance(creator) == 90   # 100 - 50 + 40 (80% of 50)
+    assert get_balance(solver) == 100   # solver never rewarded (no accept)
+
+
+def test_expire_skips_non_overdue(db):
+    from hermes.bounty_service import create_bounty, expire_bounties
+    creator = _ns()
+    bounty = create_bounty("Q", 50, creator)  # expires in 24h
+    result = expire_bounties()
+    # this bounty must NOT be expired
+    from hermes.db import execute_one
+    row = execute_one("SELECT status FROM bounties WHERE id = %s", (str(bounty["id"]),))
+    assert row["status"] == "open"
+

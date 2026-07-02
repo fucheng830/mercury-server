@@ -873,6 +873,14 @@ def bounty_reject(bounty_id: str, body: dict):
     return result
 
 
+@app.post("/api/bounty/expire")
+def bounty_expire():
+    """Expire overdue bounties + refund creators (open 100%, answered 80%).
+    Can be called manually or wired to the scheduler for periodic runs."""
+    from hermes.bounty_service import expire_bounties
+    return expire_bounties()
+
+
 @app.get("/api/wallet/{namespace}")
 def wallet_balance(namespace: str):
     from hermes.bounty_service import get_or_create_wallet, get_transactions

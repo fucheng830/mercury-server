@@ -322,3 +322,41 @@ def match_bounty(bounty_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         reverse=True,
     )
     return ranked[:limit]
+
+
+# ── Expiry / refund (C2-2) ─────────────────────────────────────────────────
+
+EXPIRY_REFUND_RATE = {"open": 1.0, "answered": 0.8}
+
+
+def expire_bounties() -> Dict[str, Any]:
+    """Expire overdue bounties and refund creators.
+
+    Rate depends on status at expiry (creator-responsibility based):
+      - 'open'     → 100% refund (no one claimed; creator not at fault)
+      - 'answered' → 80% refund (someone answered but creator didn't accept in time)
+    Returns {expired, refunded_total}.
+    """
+    rows = execute(
+        "SELECT * FROM bounties WHERE expires_at < now() AND status IN ('open', 'answered')",
+        (),
+        fetch=True,
+    ) or []
+    expired = 0
+    refunded_total = 0
+    for b in rows:
+        rate = EXPIRY_REFUND_RATE.get(b["status"], 0.0)
+        refund = round(b["amount"] * rate)
+        if refund > 0:
+            transfer(
+                from_namespace=None,
+                to_namespace=b["creator_namespace"],
+                amount=refund,
+                transaction_type="bounty_refund",
+                reference_id=str(b["id"]),
+                description=f"Bounty expired ({b['status']}): {int(rate * 100)}% refund",
+            )
+            refunded_total += refund
+        execute("UPDATE bounties SET status = 'expired' WHERE id = %s", (b["id"],))
+        expired += 1
+    return {"expired": expired, "refunded_total": refunded_total}
