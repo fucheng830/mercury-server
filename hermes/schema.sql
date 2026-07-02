@@ -332,3 +332,39 @@ UPDATE memories SET valid_to = updated_at WHERE status = 'superseded' AND valid_
 
 CREATE INDEX IF NOT EXISTS idx_memories_valid_on    ON memories(valid_to) WHERE valid_to IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by) WHERE superseded_by IS NOT NULL;
+
+-- ════════════════════════════════════════════════════════════════════════
+-- v3: Counterexample gate (2026-07-02)
+-- memory_refutations: many-to-many evidence chain (why a memory is refuted).
+-- memory_events: append-only demotion audit.
+-- See docs/superpowers/specs/2026-07-02-mercury-counterexample-gate-design.md
+-- NOTE: session_ref is TEXT (JSON string), not JSONB — btree UNIQUE cannot
+-- include JSONB columns. Content is parsed as JSON on read.
+-- ════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS memory_refutations (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  target_id   UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  refuting_id UUID REFERENCES memories(id) ON DELETE SET NULL,
+  session_ref TEXT,
+  reason      TEXT NOT NULL,
+  source      VARCHAR(20) NOT NULL,
+  confidence  VARCHAR(10),
+  namespace   VARCHAR(50) NOT NULL DEFAULT 'claude',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (refuting_id IS NOT NULL OR session_ref IS NOT NULL),
+  UNIQUE(target_id, refuting_id, session_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_refutations_target     ON memory_refutations(target_id);
+CREATE INDEX IF NOT EXISTS idx_refutations_ns_target  ON memory_refutations(namespace, target_id);
+
+CREATE TABLE IF NOT EXISTS memory_events (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  memory_id  UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  event      VARCHAR(20) NOT NULL,
+  trigger    VARCHAR(20) NOT NULL,
+  reason     TEXT,
+  details    JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memory_events_memory ON memory_events(memory_id, created_at DESC);
+
