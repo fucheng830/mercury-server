@@ -179,13 +179,13 @@ def _reconcile_and_write(
             counts["duplicates"] += 1
         elif action == "supersede":
             tid = act.get("target")
-            new_mem = None
-            if tid:
-                supersede_memory(tid, namespace=namespace)
-                involved_targets.append(tid)
-                counts["superseded"] += 1
+            # Write the new memory first so we can link superseded_by (spec §4.1/§3.3).
             new_mem = _write_extracted(item, project_id, namespace)
             counts["new"] += 1
+            if tid:
+                supersede_memory(tid, superseded_by=new_mem["id"] if new_mem else None, namespace=namespace)
+                involved_targets.append(tid)
+                counts["superseded"] += 1
             # Channel 1 audit: link refutation + record event
             if tid and new_mem:
                 from hermes.counterexample_service import add_refutation, record_event
