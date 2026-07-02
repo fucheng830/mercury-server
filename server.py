@@ -853,6 +853,26 @@ def bounty_match(bounty_id: str, limit: int = Query(5, ge=1, le=20)):
     return {"matches": match_bounty(bounty_id, limit=limit)}
 
 
+@app.post("/api/bounty/{bounty_id}/accept")
+def bounty_accept(bounty_id: str, body: dict):
+    """Creator accepts a pending answer → reward solver + promote memory."""
+    from hermes.bounty_service import accept_bounty
+    result = accept_bounty(bounty_id, body.get("creator_namespace", ""))
+    if not result:
+        raise HTTPException(400, "Bounty not in 'answered' state or you are not the creator")
+    return result
+
+
+@app.post("/api/bounty/{bounty_id}/reject")
+def bounty_reject(bounty_id: str, body: dict):
+    """Creator rejects a pending answer → reopen bounty, archive solution memory."""
+    from hermes.bounty_service import reject_bounty
+    result = reject_bounty(bounty_id, body.get("creator_namespace", ""))
+    if not result:
+        raise HTTPException(400, "Bounty not in 'answered' state or you are not the creator")
+    return result
+
+
 @app.get("/api/wallet/{namespace}")
 def wallet_balance(namespace: str):
     from hermes.bounty_service import get_or_create_wallet, get_transactions

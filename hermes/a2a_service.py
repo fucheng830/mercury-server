@@ -130,6 +130,20 @@ def get_agent_card(base_url: str = "http://localhost:8788") -> Dict:
                 "inputModes": ["text"],
                 "outputModes": ["text"],
             },
+            {
+                "id": "bounty.accept",
+                "name": "Accept Bounty Answer",
+                "description": "Creator accepts a pending answer. Rewards solver (amount + 20% bonus) and promotes the solution memory.",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
+            {
+                "id": "bounty.reject",
+                "name": "Reject Bounty Answer",
+                "description": "Creator rejects a pending answer. No reward; solution memory archived; bounty reopens for re-claiming.",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
         ],
     }
 
@@ -220,8 +234,12 @@ def handle_send_message(message: Dict, agent_id: str) -> Dict:
             return _handle_bounty_answer(agent_id, params)
         elif skill == "bounty.match":
             return _handle_bounty_match(agent_id, params)
+        elif skill == "bounty.accept":
+            return _handle_bounty_accept(agent_id, params)
+        elif skill == "bounty.reject":
+            return _handle_bounty_reject(agent_id, params)
         else:
-            return _error(f"Unknown skill: {skill}. Available: memory.write/search/read/share, session.search/read/share, bounty.create/list/claim/answer/match")
+            return _error(f"Unknown skill: {skill}. Available: memory.write/search/read/share, session.search/read/share, bounty.create/list/claim/answer/match/accept/reject")
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
@@ -389,6 +407,28 @@ def _handle_bounty_match(agent_id: str, params: Dict) -> Dict:
         raise ValueError("'bounty_id' is required for bounty.match")
     matches = match_bounty(bid, limit=params.get("limit", 5))
     return _ok({"bounty_id": bid, "matches": matches, "total": len(matches)})
+
+
+def _handle_bounty_accept(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import accept_bounty
+    bid = params.get("bounty_id", "")
+    if not bid:
+        raise ValueError("'bounty_id' is required for bounty.accept")
+    result = accept_bounty(bid, agent_id)  # creator-only (agent_id = creator namespace)
+    if not result:
+        return _ok({"accepted": False, "error": "Bounty not found, not in 'answered' state, or you are not the creator"})
+    return _ok({"accepted": True, **result})
+
+
+def _handle_bounty_reject(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import reject_bounty
+    bid = params.get("bounty_id", "")
+    if not bid:
+        raise ValueError("'bounty_id' is required for bounty.reject")
+    result = reject_bounty(bid, agent_id)
+    if not result:
+        return _ok({"rejected": False, "error": "Bounty not found, not in 'answered' state, or you are not the creator"})
+    return _ok({"rejected": True, **result})
 
 
 # ── Response Helpers ───────────────────────────────────────────────────────

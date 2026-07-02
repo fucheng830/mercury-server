@@ -21,7 +21,7 @@ os.environ.setdefault("MERCURY_EMBEDDING_URL", "http://192.168.0.13:11434")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hermes.bounty_service import (
-    get_balance, create_bounty, claim_bounty, answer_bounty, get_transactions,
+    get_balance, create_bounty, claim_bounty, answer_bounty, accept_bounty, get_transactions,
 )
 
 alice = f"demo-alice-{uuid.uuid4().hex[:6]}"
@@ -44,10 +44,13 @@ bid = str(bounty["id"])
 print(f"    Bounty: {bid}")
 print(f"    Alice balance now: {get_balance(alice)} AMN  (50 locked in escrow)")
 
-print(f"\n[3] Bob claims and answers")
+print(f"\n[3] Bob claims, answers (pending), Alice accepts")
 claim_bounty(bid, bob)
-result = answer_bounty(bid, "Enable the extension in template1 before pg_dump.", bob)
-print(f"    Resolved: reward = {result['reward']} AMN "
+ans = answer_bounty(bid, "Enable the extension in template1 before pg_dump.", bob)
+print(f"    Answer status: {ans['status']} (pending - no reward yet)")
+print(f"    Bob balance: {get_balance(bob)} AMN (still 100, awaiting Alice's acceptance)")
+result = accept_bounty(bid, alice)
+print(f"    Alice accepted -> reward = {result['reward']} AMN "
       f"(bounty {result['reward'] - result['bonus']} + bonus {result['bonus']})")
 
 print(f"\n[4] Final ledger")
