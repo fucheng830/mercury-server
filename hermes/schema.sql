@@ -351,9 +351,30 @@ CREATE TABLE IF NOT EXISTS memory_refutations (
   confidence  VARCHAR(10),
   namespace   VARCHAR(50) NOT NULL DEFAULT 'claude',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (refuting_id IS NOT NULL OR session_ref IS NOT NULL),
-  UNIQUE(target_id, refuting_id, session_ref)
+  CHECK (refuting_id IS NOT NULL OR session_ref IS NOT NULL)
 );
+-- Drop the table-level UNIQUE if it exists (added in an earlier draft of this
+-- migration); NULLs in refuting_id/session_ref make it ineffective for dedup
+-- and its presence would allow two (t, e, NULL) rows. Idempotent.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'memory_refutations_target_id_refuting_id_session_ref_key'
+      AND conrelid = 'memory_refutations'::regclass) THEN
+    ALTER TABLE memory_refutations
+      DROP CONSTRAINT memory_refutations_target_id_refuting_id_session_ref_key;
+  END IF;
+END $$;
+-- Dedup on (target_id, refuting_id, session_ref) where NULLs must collide.
+-- The plain table-level UNIQUE does NOT treat NULLs as equal (two rows
+-- (t, e, NULL) coexist), so we use a COALESCE expression index instead.
+-- The sentinel values must never occur naturally.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_refutations_dedup
+  ON memory_refutations (
+    target_id,
+    COALESCE(refuting_id, '00000000-0000-0000-0000-000000000000'),
+    COALESCE(session_ref, '')
+  );
 CREATE INDEX IF NOT EXISTS idx_refutations_target     ON memory_refutations(target_id);
 CREATE INDEX IF NOT EXISTS idx_refutations_ns_target  ON memory_refutations(namespace, target_id);
 
