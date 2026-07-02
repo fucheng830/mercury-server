@@ -189,3 +189,39 @@ def test_gate_status_report():
     add_refutation(t["id"], e["id"], "r")
     gs = gate_status(t["id"])
     assert gs["count"] == 1 and gs["threshold"] == 2 and gs["active"] is True
+
+
+def test_channel1_llm_supersede_creates_refutation_and_event(monkeypatch):
+    """When extractor reconcile supersedes target T in favor of new memory N,
+    a memory_refutations(target=T, refuting=N, source='llm_reconcile') and a
+    memory_events(T, 'superseded', 'llm_reconcile') must be recorded."""
+    from hermes import extractor
+    from hermes.memory_service import get_or_create_project
+    from hermes.counterexample_service import count_refutations, list_events
+
+    pid = get_or_create_project("p-ch1", "/p/ch1", "claude")["id"]
+    # seed an existing active memory that reconcile will target
+    existing = _write("use lib A for auth", pid, type="DECISION", importance=3, seed=30)
+    # fake LLM reconcile output: supersede existing with the new item
+    fake_items = [{"content": "switched to lib B", "type": "DECISION",
+                   "importance": 3, "confidence": "high"}]
+    fake_actions = [{"index": 0, "action": "supersede", "target": existing["id"]}]
+
+    class _FakeLLM:
+        def generate_json(self, prompt, text, max_tokens=None):
+            # _reconcile_and_write makes a single reconcile call (items already
+            # extracted). Return the supersede action when we see the reconcile
+            # user-prompt markers.
+            if "请对每条新记忆判定" in text or "现有活跃记忆" in text:
+                return {"actions": fake_actions}
+            return {"processed": fake_items}
+
+    # _reconcile_and_write does both extract-style write and reconcile in one call;
+    # it calls llm.generate_json once for reconcile only (items already extracted).
+    counts = extractor._reconcile_and_write(
+        fake_items, pid, "p-ch1", _FakeLLM(), namespace="claude")
+
+    assert counts["superseded"] >= 1
+    assert count_refutations(existing["id"]) == 1
+    evs = list_events(existing["id"])
+    assert any(e["event"] == "superseded" and e["trigger"] == "llm_reconcile" for e in evs)

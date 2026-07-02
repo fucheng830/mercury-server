@@ -9,7 +9,7 @@ so memories stay self-consistent across sessions.
 See docs/superpowers/specs/2026-06-20-memory-system-agent-first-design.md
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from recap.llm_service import LLMService
 
@@ -106,7 +106,7 @@ def _link_concepts(memory_id: str, concepts, tags=None) -> None:
             logger.warning("link concept '%s' failed: %s", name, e)
 
 
-def _write_extracted(item: Dict, project_id: str, namespace: str) -> None:
+def _write_extracted(item: Dict, project_id: str, namespace: str) -> Optional[Dict]:
     from hermes.memory_service import write_memory
     conf = (item.get("confidence") or "low").lower()
     stage = "memory" if conf == "high" else "candidate"
@@ -124,8 +124,9 @@ def _write_extracted(item: Dict, project_id: str, namespace: str) -> None:
         )
     except Exception as e:
         logger.warning("write extracted memory failed: %s", e)
-        return
+        return None
     _link_concepts(mem.get("id"), item.get("concepts"), item.get("tags"))
+    return mem
 
 
 def _reconcile_and_write(
@@ -175,11 +176,25 @@ def _reconcile_and_write(
             counts["duplicates"] += 1
         elif action == "supersede":
             tid = act.get("target")
+            new_mem = None
             if tid:
                 supersede_memory(tid, namespace=namespace)
                 counts["superseded"] += 1
-            _write_extracted(item, project_id, namespace)
+            new_mem = _write_extracted(item, project_id, namespace)
             counts["new"] += 1
+            # Channel 1 audit: link refutation + record event
+            if tid and new_mem:
+                from hermes.counterexample_service import add_refutation, record_event
+                add_refutation(
+                    target_id=tid, refuting_id=new_mem["id"], namespace=namespace,
+                    reason="LLM reconcile: superseded by newer memory",
+                    source="llm_reconcile", confidence=item.get("confidence"),
+                )
+                record_event(
+                    tid, "superseded", "llm_reconcile",
+                    reason="LLM reconcile: superseded",
+                    details={"superseded_by": new_mem["id"]},
+                )
         else:
             _write_extracted(item, project_id, namespace)
             counts["new"] += 1
