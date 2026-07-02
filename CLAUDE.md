@@ -60,6 +60,7 @@ server.py (FastAPI, 端口 8788)
 | `entities` / `relations` | 知识图谱 |
 | `clients` | 注册的同步客户端 |
 | `a2a_agents` | A2A Agent 注册信息 |
+| `memory_refutations` / `memory_events` | 反例证据链 + 降级审计（counterexample gate，确定性阈值补漏 supersede）|
 
 ## 部署（0.17）
 
