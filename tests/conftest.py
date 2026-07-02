@@ -24,7 +24,7 @@ def _ensure_schema():
         init_db()
 
 
-_TRUNCATE = ("memory_entities", "relations", "entities", "memory_events", "memory_refutations", "memories", "projects")
+_TRUNCATE = ("memory_entities", "relations", "entities", "memory_events", "memory_refutations", "memories", "projects", "transactions", "bounties", "wallets")
 
 
 @pytest.fixture

@@ -389,3 +389,51 @@ CREATE TABLE IF NOT EXISTS memory_events (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_events_memory ON memory_events(memory_id, created_at DESC);
 
+-- ════════════════════════════════════════════════════════════════════════
+-- C-Stage: Bounty Economy (2026-07-02)
+-- Knowledge-market layer on top of memory. wallet keyed by namespace
+-- (= agent_id). Escrow = system (to_namespace NULL). Infinite-issuance MVP.
+-- See docs/superpowers/specs/2026-07-02-c-stage-knowledge-market-design.md
+-- ════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS wallets (
+    namespace      VARCHAR(50) PRIMARY KEY,
+    token_balance  INTEGER NOT NULL DEFAULT 0,
+    tokens_earned  INTEGER NOT NULL DEFAULT 0,
+    tokens_spent   INTEGER NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    from_namespace   VARCHAR(50),
+    to_namespace     VARCHAR(50),
+    amount           INTEGER NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,
+    reference_id     TEXT,
+    description      TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_transactions_from ON transactions(from_namespace);
+CREATE INDEX IF NOT EXISTS idx_transactions_to   ON transactions(to_namespace);
+
+CREATE TABLE IF NOT EXISTS bounties (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question           TEXT NOT NULL,
+    amount             INTEGER NOT NULL CHECK (amount >= 10),
+    currency           VARCHAR(10) NOT NULL DEFAULT 'AMN',
+    framework          VARCHAR(50),
+    status             VARCHAR(12) NOT NULL DEFAULT 'open'
+                       CHECK (status IN ('open','claimed','resolved','expired')),
+    creator_namespace  VARCHAR(50) NOT NULL,
+    claimer_namespace  VARCHAR(50),
+    solution           TEXT,
+    resolved_memory_id UUID,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at         TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours'),
+    claimed_at         TIMESTAMPTZ,
+    resolved_at        TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_bounties_status  ON bounties(status);
+CREATE INDEX IF NOT EXISTS idx_bounties_creator ON bounties(creator_namespace);
+
