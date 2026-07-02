@@ -881,6 +881,18 @@ def bounty_expire():
     return expire_bounties()
 
 
+@app.post("/api/bounty/{bounty_id}/auto-answer")
+def bounty_auto_answer(bounty_id: str, body: dict):
+    """Auto-answer a bounty from a namespace's relevant memory (C2-3 simplified).
+    Body: {namespace, threshold?}. Still goes through governance (pending accept)."""
+    from hermes.bounty_service import auto_answer_bounty
+    return auto_answer_bounty(
+        bounty_id,
+        body.get("namespace", ""),
+        threshold=body.get("threshold", 0.3),
+    )
+
+
 @app.get("/api/wallet/{namespace}")
 def wallet_balance(namespace: str):
     from hermes.bounty_service import get_or_create_wallet, get_transactions

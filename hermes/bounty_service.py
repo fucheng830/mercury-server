@@ -360,3 +360,59 @@ def expire_bounties() -> Dict[str, Any]:
         execute("UPDATE bounties SET status = 'expired' WHERE id = %s", (b["id"],))
         expired += 1
     return {"expired": expired, "refunded_total": refunded_total}
+
+
+# ── Auto-answer (C2-3 simplified) ──────────────────────────────────────────
+
+AUTO_ANSWER_THRESHOLD = 0.0  # RRF scores are tiny (~0.01-0.05 at rrf_k=60); 0 = answer on any match, governance gates quality
+
+
+def auto_answer_bounty(
+    bounty_id: str,
+    namespace: str,
+    threshold: float = AUTO_ANSWER_THRESHOLD,
+) -> Dict[str, Any]:
+    """Auto-answer a bounty if the namespace has sufficiently relevant memory.
+
+    Simplified C2-3 (semi-automatic; not a fully autonomous agent):
+      1. search the namespace's memories for the bounty question
+      2. if best match score >= threshold → claim + answer with that memory's content
+    The answer still goes through governance (status=answered, awaits creator accept).
+    Returns {auto_answered, reason, ...}.
+    """
+    bounty = execute_one(
+        "SELECT * FROM bounties WHERE id = %s AND status = 'open'", (bounty_id,)
+    )
+    if not bounty:
+        return {"auto_answered": False, "reason": "bounty not found or not open"}
+
+    try:
+        from hermes.memory_service import search_memories
+        results = search_memories(
+            query_text=bounty["question"], limit=3, namespaces=[namespace]
+        )
+    except Exception as e:
+        logger.warning("auto_answer search failed: %s", e)
+        return {"auto_answered": False, "reason": f"search failed: {e}"}
+
+    if not results:
+        return {"auto_answered": False, "reason": "no relevant memory in namespace"}
+
+    top = results[0]
+    score = float(top.get("rrf_score") or top.get("score") or 0)
+    if score < threshold:
+        return {"auto_answered": False, "reason": f"best score {score:.3f} below threshold {threshold}"}
+
+    claimed = claim_bounty(bounty_id, namespace)
+    if not claimed:
+        return {"auto_answered": False, "reason": "claim failed (already claimed?)"}
+
+    solution = top.get("summary") or top.get("content") or "(auto-generated from prior memory)"
+    ans = answer_bounty(bounty_id, solution, namespace)
+    return {
+        "auto_answered": True,
+        "bounty_id": bounty_id,
+        "memory_used": top.get("id"),
+        "score": score,
+        **(ans or {}),
+    }

@@ -189,3 +189,34 @@ def test_expire_skips_non_overdue(db):
     row = execute_one("SELECT status FROM bounties WHERE id = %s", (str(bounty["id"]),))
     assert row["status"] == "open"
 
+
+# ── C2-3: auto-answer (simplified) ─────────────────────────────────────────
+
+def test_auto_answer_no_memory(db):
+    """auto-answer a bounty when the namespace has no memory → not answered."""
+    from hermes.bounty_service import create_bounty, auto_answer_bounty
+    creator, candidate = _ns(), _ns()
+    bounty = create_bounty("Q about something obscure", 50, creator)
+    result = auto_answer_bounty(str(bounty["id"]), candidate)
+    assert result["auto_answered"] is False
+
+
+def test_auto_answer_with_memory(db, embedding_ok):
+    """auto-answer when the namespace has relevant memory → claims + answers (pending)."""
+    from hermes.bounty_service import create_bounty, auto_answer_bounty
+    from hermes.memory_service import write_memory
+    creator, candidate = _ns(), _ns()
+    # seed the candidate's memory with relevant content
+    write_memory(
+        content="To configure pgvector, enable the extension in template1 before pg_dump.",
+        stage="memory", source="test", importance=3, type="DISCOVERY",
+        scope="global", namespace=candidate,
+    )
+    bounty = create_bounty("How to configure pgvector with pg_dump?", 50, creator)
+    result = auto_answer_bounty(str(bounty["id"]), candidate)
+    assert result["auto_answered"] is True
+    # answer is pending (governance) — creator still must accept
+    from hermes.db import execute_one
+    row = execute_one("SELECT status FROM bounties WHERE id = %s", (str(bounty["id"]),))
+    assert row["status"] == "answered"
+
