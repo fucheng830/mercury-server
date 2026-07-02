@@ -225,3 +225,43 @@ def test_channel1_llm_supersede_creates_refutation_and_event(monkeypatch):
     assert count_refutations(existing["id"]) == 1
     evs = list_events(existing["id"])
     assert any(e["event"] == "superseded" and e["trigger"] == "llm_reconcile" for e in evs)
+
+
+def test_channel2_threshold_demotes_cumulative_refutations():
+    """If an active memory accumulates >= threshold refutations across multiple
+    ingest runs (not a single LLM supersede), channel 2 demotes it."""
+    from hermes.counterexample_service import add_refutation, demote_by_threshold, list_events
+    from hermes.memory_service import get_memory
+    pid = _proj("p-ch2")
+    t = _write("important arch", pid, importance=4, seed=40)  # threshold 2
+    # two refutations from prior runs (no LLM supersede happened — LLM missed it)
+    e1 = _write("contra1", pid, seed=41)
+    e2 = _write("contra2", pid, seed=42)
+    add_refutation(t["id"], e1["id"], "r1", source="agent")
+    add_refutation(t["id"], e2["id"], "r2", source="agent")
+    # channel 2 sweep on the involved target
+    r = demote_by_threshold(t["id"])
+    assert r["demoted"] is True
+    assert get_memory(t["id"])["status"] == "superseded"
+    evs = list_events(t["id"])
+    assert any(e["trigger"] == "threshold" for e in evs)
+
+
+def test_reconcile_apply_runs_channel2_on_involved_targets():
+    from hermes import extractor
+    from hermes.memory_service import get_or_create_project, get_memory
+    from hermes.counterexample_service import add_refutation
+
+    pid = get_or_create_project("p-ch2e2e", "/p/ch2e2e", "claude")["id"]
+    target = _write("dup target importance 3", pid, importance=3, seed=50)
+    ev = _write("prior evidence", pid, seed=51)
+    add_refutation(target["id"], ev["id"], "prior", source="agent")  # at threshold 1
+
+    fake_items = [{"content": "dup target importance 3", "type": "ARCH", "importance": 3}]
+
+    class _FakeLLM:
+        def generate_json(self, prompt, text, max_tokens=None):
+            return {"actions": [{"index": 0, "action": "duplicate_of", "target": target["id"]}]}
+
+    extractor._reconcile_and_write(fake_items, pid, "p-ch2e2e", _FakeLLM(), namespace="claude")
+    assert get_memory(target["id"])["status"] == "superseded"  # channel 2 demoted

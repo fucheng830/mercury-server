@@ -140,6 +140,8 @@ def _reconcile_and_write(
     if not items:
         return counts
 
+    involved_targets: List[str] = []
+
     existing = list_memories(
         stage="memory", project_id=project_id, statuses=["active"], size=50,
     ).get("items", [])
@@ -173,12 +175,14 @@ def _reconcile_and_write(
             tid = act.get("target")
             if tid:
                 bump_memory(tid, content=item.get("content"), importance=item.get("importance"), namespace=namespace)
+                involved_targets.append(tid)
             counts["duplicates"] += 1
         elif action == "supersede":
             tid = act.get("target")
             new_mem = None
             if tid:
                 supersede_memory(tid, namespace=namespace)
+                involved_targets.append(tid)
                 counts["superseded"] += 1
             new_mem = _write_extracted(item, project_id, namespace)
             counts["new"] += 1
@@ -198,6 +202,14 @@ def _reconcile_and_write(
         else:
             _write_extracted(item, project_id, namespace)
             counts["new"] += 1
+    # Channel 2: threshold backstop — demote any involved active target whose
+    # cumulative refutations now meet the gate. Catches LLM-missed cumulative
+    # contradictions. Scoped to involved targets (spec §4.2) for performance.
+    from hermes.counterexample_service import demote_by_threshold
+    for tid in involved_targets:
+        result = demote_by_threshold(tid, namespace=namespace)
+        if result.get("demoted"):
+            counts["threshold_demoted"] = counts.get("threshold_demoted", 0) + 1
     return counts
 
 
