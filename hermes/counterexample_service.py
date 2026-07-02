@@ -13,9 +13,11 @@ See docs/superpowers/specs/2026-07-02-mercury-counterexample-gate-design.md
 """
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from hermes.db import execute, execute_one
+from hermes.memory_service import supersede_memory
 
 logger = logging.getLogger(__name__)
 
@@ -144,3 +146,68 @@ def list_events(memory_id: str) -> List[Dict]:
         fetch=True,
     )
     return [dict(r) for r in (rows or [])]
+
+
+# ── threshold demotion (channel 2) ──────────────────────────────────────────
+
+def demote_by_threshold(memory_id: str, namespace: str = "claude") -> Dict[str, Any]:
+    """Channel 2: supersede an active memory if its refutation count >= threshold.
+    Reuses supersede_memory() for the bi-temporal close. Idempotent — returns
+    demoted=False without error if already non-active or below threshold."""
+    row = execute_one(
+        "SELECT id, importance, type, status FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    if not row:
+        return {"demoted": False, "reason": "not found", "count": 0, "threshold": None}
+    if row["status"] != "active":
+        return {"demoted": False, "reason": "not active",
+                "count": 0, "threshold": None}
+    count = count_refutations(memory_id, namespace)
+    thr = threshold_for(row["importance"] or 3, row["type"] or "NOTE")
+    if count < thr:
+        return {"demoted": False, "reason": "below threshold",
+                "count": count, "threshold": thr}
+    supersede_memory(memory_id, superseded_by=None, namespace=namespace)
+    record_event(
+        memory_id, "demoted", "threshold",
+        reason=f"{count} refutations >= threshold {thr}",
+        details={"count": count, "threshold": thr,
+                 "importance": row["importance"], "type": row["type"]},
+    )
+    return {"demoted": True, "count": count, "threshold": thr,
+            "importance": row["importance"], "type": row["type"]}
+
+
+def gate_status(memory_id: str, namespace: str = "claude") -> Optional[Dict[str, Any]]:
+    """Read-only snapshot of a memory's current gate state."""
+    row = execute_one(
+        "SELECT importance, type, status FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    if not row:
+        return None
+    count = count_refutations(memory_id, namespace)
+    thr = threshold_for(row["importance"] or 3, row["type"] or "NOTE")
+    return {"count": count, "threshold": thr,
+            "active": row["status"] == "active",
+            "importance": row["importance"], "type": row["type"]}
+
+
+def restore_memory(memory_id: str, namespace: str = "claude") -> bool:
+    """Reverse a demote: status->active, clear valid_to + superseded_by. Only
+    applies to currently-superseded rows; records a 'restored' audit event."""
+    now = datetime.now(timezone.utc)
+    execute(
+        "UPDATE memories SET status = 'active', valid_to = NULL, superseded_by = NULL, "
+        "updated_at = %s WHERE id = %s AND namespace = %s AND status = 'superseded'",
+        (now, memory_id, namespace),
+    )
+    row = execute_one(
+        "SELECT status FROM memories WHERE id = %s AND namespace = %s",
+        (memory_id, namespace),
+    )
+    restored = bool(row and row["status"] == "active")
+    if restored:
+        record_event(memory_id, "restored", "manual", reason="manual restore")
+    return restored

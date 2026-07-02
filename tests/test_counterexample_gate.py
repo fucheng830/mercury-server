@@ -107,3 +107,85 @@ def test_record_and_list_events():
     record_event(t["id"], "refuted", "agent", reason="manual", details={"k": "v"})
     evs = list_events(t["id"])
     assert any(e["event"] == "refuted" and e["trigger"] == "agent" for e in evs)
+
+
+def test_demote_normal_importance_one_refutation():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold
+    from hermes.memory_service import get_memory
+    pid = _proj("p-dem1")
+    t = _write("old", pid, importance=3, seed=10)
+    e = _write("contra", pid, seed=11)
+    add_refutation(t["id"], e["id"], "r")
+    r = demote_by_threshold(t["id"])
+    assert r["demoted"] is True and r["count"] == 1 and r["threshold"] == 1
+    assert get_memory(t["id"])["status"] == "superseded"
+
+
+def test_demote_high_importance_needs_two():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold
+    pid = _proj("p-dem2")
+    t = _write("arch", pid, importance=4, seed=12)   # threshold 2
+    e1 = _write("e1", pid, seed=13)
+    add_refutation(t["id"], e1["id"], "r1")
+    assert demote_by_threshold(t["id"])["demoted"] is False   # 1 < 2
+    e2 = _write("e2", pid, seed=14)
+    add_refutation(t["id"], e2["id"], "r2")
+    assert demote_by_threshold(t["id"])["demoted"] is True    # 2 >= 2
+
+
+def test_demote_decision_floor_two():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold
+    pid = _proj("p-dem3")
+    t = _write("dec", pid, importance=3, type="DECISION", seed=15)  # decision_min 2
+    e1 = _write("e1", pid, seed=16)
+    add_refutation(t["id"], e1["id"], "r1")
+    assert demote_by_threshold(t["id"])["demoted"] is False
+    e2 = _write("e2", pid, seed=17)
+    add_refutation(t["id"], e2["id"], "r2")
+    assert demote_by_threshold(t["id"])["demoted"] is True
+
+
+def test_demote_skips_non_active():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold, restore_memory
+    pid = _proj("p-dem4")
+    t = _write("t", pid, importance=3, seed=18)
+    e = _write("e", pid, seed=19)
+    add_refutation(t["id"], e["id"], "r")
+    demote_by_threshold(t["id"])          # now superseded
+    again = demote_by_threshold(t["id"])  # should skip
+    assert again["demoted"] is False
+
+
+def test_demote_records_threshold_event():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold, list_events
+    pid = _proj("p-dem5")
+    t = _write("t", pid, importance=3, seed=20)
+    e = _write("e", pid, seed=21)
+    add_refutation(t["id"], e["id"], "r")
+    demote_by_threshold(t["id"])
+    evs = list_events(t["id"])
+    assert any(ev["event"] == "demoted" and ev["trigger"] == "threshold" for ev in evs)
+
+
+def test_restore_clears_superseded():
+    from hermes.counterexample_service import add_refutation, demote_by_threshold, restore_memory
+    from hermes.memory_service import get_memory
+    pid = _proj("p-rest")
+    t = _write("t", pid, importance=3, seed=22)
+    e = _write("e", pid, seed=23)
+    add_refutation(t["id"], e["id"], "r")
+    demote_by_threshold(t["id"])
+    assert get_memory(t["id"])["status"] == "superseded"
+    assert restore_memory(t["id"]) is True
+    m = get_memory(t["id"])
+    assert m["status"] == "active" and m.get("valid_to") is None
+
+
+def test_gate_status_report():
+    from hermes.counterexample_service import add_refutation, gate_status
+    pid = _proj("p-gate")
+    t = _write("arch", pid, importance=4, seed=24)
+    e = _write("e", pid, seed=25)
+    add_refutation(t["id"], e["id"], "r")
+    gs = gate_status(t["id"])
+    assert gs["count"] == 1 and gs["threshold"] == 2 and gs["active"] is True
