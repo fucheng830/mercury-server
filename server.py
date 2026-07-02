@@ -371,6 +371,25 @@ def memory_refutations(memory_id: str, namespace: str = "claude"):
             "gate": gate_status(memory_id, namespace)}
 
 
+@app.post("/api/memory/{memory_id}/demote")
+def memory_demote(memory_id: str, body: dict = None):
+    """Explicitly trigger the threshold gate. 409 if below threshold."""
+    from hermes.counterexample_service import demote_by_threshold
+    namespace = (body or {}).get("namespace", "claude")
+    result = demote_by_threshold(memory_id, namespace=namespace)
+    if not result["demoted"]:
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@app.post("/api/memory/{memory_id}/restore")
+def memory_restore(memory_id: str, body: dict = None):
+    """Reverse a demote (status→active, clear valid_to/superseded_by)."""
+    from hermes.counterexample_service import restore_memory
+    namespace = (body or {}).get("namespace", "claude")
+    return {"restored": restore_memory(memory_id, namespace=namespace)}
+
+
 @app.get("/api/memory/graph")
 def memory_graph(
     entity: Optional[str] = Query(None),

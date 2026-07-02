@@ -301,3 +301,30 @@ def test_endpoint_refute_session_ref():
         "session_ref": {"session_id": "s1", "span": [5, 9]},
         "reason": "session shows the opposite", "source": "agent"})
     assert r.status_code == 200 and r.json()["refuted"] is True
+
+
+def test_endpoint_demote_below_threshold_returns_409():
+    from fastapi.testclient import TestClient
+    from server import app
+    from hermes.memory_service import get_or_create_project
+    pid = get_or_create_project("p-api3", "/p/api3", "claude")["id"]
+    t = _write("arch importance 4", pid, importance=4, seed=70)  # threshold 2, 0 refs
+    client = TestClient(app)
+    r = client.post(f"/api/memory/{t['id']}/demote", json={})
+    assert r.status_code == 409
+    assert "below threshold" in r.json()["detail"]["reason"]
+
+
+def test_endpoint_restore_after_demote():
+    from fastapi.testclient import TestClient
+    from server import app
+    from hermes.memory_service import get_or_create_project, get_memory
+    pid = get_or_create_project("p-api4", "/p/api4", "claude")["id"]
+    t = _write("will demote", pid, importance=3, seed=71)
+    e = _write("ev", pid, seed=72)
+    client = TestClient(app)
+    client.post(f"/api/memory/{t['id']}/refute", json={"refuting_id": e["id"], "reason": "r"})
+    assert get_memory(t["id"])["status"] == "superseded"
+    r = client.post(f"/api/memory/{t['id']}/restore", json={})
+    assert r.status_code == 200 and r.json()["restored"] is True
+    assert get_memory(t["id"])["status"] == "active"
