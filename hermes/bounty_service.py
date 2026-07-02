@@ -182,7 +182,11 @@ def answer_bounty(
     solution: str,
     solver_namespace: str,
 ) -> Optional[Dict[str, Any]]:
-    """Submit answer for a claimed bounty: reward solver, sink solution to memory."""
+    """Submit answer for a claimed bounty → enters PENDING (status=answered).
+
+    C2-1 governance: NO reward yet. Solution sunk as an observation memory;
+    creator must call accept_bounty() to reward + promote, or reject_bounty() to reopen.
+    """
     bounty = execute_one(
         "SELECT * FROM bounties WHERE id = %s AND claimer_namespace = %s AND status = 'claimed'",
         (bounty_id, solver_namespace),
@@ -190,13 +194,13 @@ def answer_bounty(
     if not bounty:
         return None
 
-    # Sink solution into memory (bounty reward replaces memory contribution reward — no double pay)
+    # Sink solution as observation (pending acceptance — not promoted to memory yet)
     memory_id = None
     try:
         from hermes.memory_service import write_memory
         mem = write_memory(
             content=f"Q: {bounty['question']}\n\nA: {solution}",
-            stage="memory",
+            stage="observation",
             source="bounty",
             importance=4,
             type="DISCOVERY",
@@ -209,24 +213,81 @@ def answer_bounty(
     except Exception as e:
         logger.warning("write_memory for bounty answer failed: %s", e)
 
-    # Reward solver: amount + bonus, issued by system (infinite issuance)
-    bonus = round(bounty["amount"] * BOUNTY_BONUS_RATE)
-    reward = bounty["amount"] + bonus
-    transfer(
-        from_namespace=None,
-        to_namespace=solver_namespace,
-        amount=reward,
-        transaction_type="bounty_reward",
-        reference_id=bounty_id,
-        description=f"Bounty reward + {bonus} bonus",
-    )
-
     execute(
-        "UPDATE bounties SET status = 'resolved', solution = %s, resolved_memory_id = %s, resolved_at = now() "
+        "UPDATE bounties SET status = 'answered', solution = %s, resolved_memory_id = %s "
         "WHERE id = %s",
         (solution, memory_id, bounty_id),
     )
-    return {"bounty_id": bounty_id, "memory_id": memory_id, "reward": reward, "bonus": bonus}
+    return {"bounty_id": bounty_id, "memory_id": memory_id, "status": "answered"}
+
+
+def accept_bounty(
+    bounty_id: str,
+    creator_namespace: str,
+) -> Optional[Dict[str, Any]]:
+    """Creator accepts a pending answer → reward solver (amount + bonus) + promote memory."""
+    bounty = execute_one(
+        "SELECT * FROM bounties WHERE id = %s AND creator_namespace = %s AND status = 'answered'",
+        (bounty_id, creator_namespace),
+    )
+    if not bounty:
+        return None
+
+    bonus = round(bounty["amount"] * BOUNTY_BONUS_RATE)
+    reward = bounty["amount"] + bonus
+    solver = bounty["claimer_namespace"]
+    transfer(
+        from_namespace=None,
+        to_namespace=solver,
+        amount=reward,
+        transaction_type="bounty_reward",
+        reference_id=bounty_id,
+        description=f"Bounty reward + {bonus} bonus (accepted)",
+    )
+
+    # Promote solution memory: observation → memory
+    mid = bounty.get("resolved_memory_id")
+    if mid:
+        try:
+            execute("UPDATE memories SET stage = 'memory' WHERE id = %s", (mid,))
+        except Exception as e:
+            logger.warning("memory promote on accept failed: %s", e)
+
+    execute(
+        "UPDATE bounties SET status = 'resolved', accepted_at = now(), resolved_at = now() "
+        "WHERE id = %s",
+        (bounty_id,),
+    )
+    return {"bounty_id": bounty_id, "solver": solver, "reward": reward, "bonus": bonus}
+
+
+def reject_bounty(
+    bounty_id: str,
+    creator_namespace: str,
+) -> Optional[Dict[str, Any]]:
+    """Creator rejects a pending answer → no reward, archive solution memory, reopen bounty."""
+    bounty = execute_one(
+        "SELECT * FROM bounties WHERE id = %s AND creator_namespace = %s AND status = 'answered'",
+        (bounty_id, creator_namespace),
+    )
+    if not bounty:
+        return None
+
+    # Archive the rejected solution memory
+    mid = bounty.get("resolved_memory_id")
+    if mid:
+        try:
+            execute("UPDATE memories SET status = 'archived' WHERE id = %s", (mid,))
+        except Exception as e:
+            logger.warning("memory archive on reject failed: %s", e)
+
+    # Reopen: clear claimer/solution, back to open for re-claiming
+    execute(
+        "UPDATE bounties SET status = 'open', claimer_namespace = NULL, claimed_at = NULL, "
+        "solution = NULL, resolved_memory_id = NULL, rejected_at = now() WHERE id = %s",
+        (bounty_id,),
+    )
+    return {"bounty_id": bounty_id, "reopened": True}
 
 
 def match_bounty(bounty_id: str, limit: int = 5) -> List[Dict[str, Any]]:

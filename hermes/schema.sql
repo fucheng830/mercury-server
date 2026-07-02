@@ -437,3 +437,17 @@ CREATE TABLE IF NOT EXISTS bounties (
 CREATE INDEX IF NOT EXISTS idx_bounties_status  ON bounties(status);
 CREATE INDEX IF NOT EXISTS idx_bounties_creator ON bounties(creator_namespace);
 
+-- C2-1: governance — add 'answered' status + accept/reject timestamps.
+-- DROP existing status CHECK (name varies) then re-add with 'answered'.
+DO $$ DECLARE r record; BEGIN
+  FOR r IN SELECT conname FROM pg_constraint
+           WHERE conrelid = 'bounties'::regclass AND contype = 'c'
+             AND pg_get_constraintdef(oid) LIKE '%status%' LOOP
+    EXECUTE 'ALTER TABLE bounties DROP CONSTRAINT IF EXISTS ' || r.conname;
+  END LOOP;
+END $$;
+ALTER TABLE bounties ADD CONSTRAINT bounties_status_check
+  CHECK (status IN ('open','claimed','answered','resolved','expired'));
+ALTER TABLE bounties ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE bounties ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+
