@@ -906,6 +906,41 @@ def wallet_balance(namespace: str):
     }
 
 
+# ── Memory Pricing API (C2-4 opt-in) ────────────────────────────────────
+
+@app.post("/api/memory/priced-search")
+def memory_priced_search(body: dict):
+    """C2-4: search with opt-in pricing — caller pays for priced hits, owner receives."""
+    from hermes.pricing_service import priced_search
+    try:
+        results = priced_search(
+            query=body.get("query", ""),
+            caller_namespace=body.get("caller_namespace", ""),
+            limit=body.get("limit", 20),
+            namespaces=body.get("namespaces"),
+        )
+        return {"results": results, "total": len(results)}
+    except Exception as e:
+        raise HTTPException(503, f"Priced search error: {str(e)}")
+
+
+@app.post("/api/memory/{memory_id}/price")
+def memory_set_price(memory_id: str, body: dict):
+    """C2-4: owner sets a price on a memory (0 = free)."""
+    from hermes.pricing_service import set_memory_price
+    try:
+        result = set_memory_price(
+            memory_id,
+            body.get("owner_namespace", ""),
+            int(body.get("price", 0)),
+        )
+        if not result:
+            raise HTTPException(400, "Memory not found or you are not the owner")
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ── Source-Scoped Routes (with DB fallback) ────────────────────────────────
 
 

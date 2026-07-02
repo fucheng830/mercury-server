@@ -451,3 +451,7 @@ ALTER TABLE bounties ADD CONSTRAINT bounties_status_check
 ALTER TABLE bounties ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
 ALTER TABLE bounties ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
 
+-- C2-4: opt-in memory pricing. 0 = free. Owner sets price; querier pays on search hit.
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS price INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_memories_price ON memories(price) WHERE price > 0;
+
