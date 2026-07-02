@@ -95,6 +95,41 @@ def get_agent_card(base_url: str = "http://localhost:8788") -> Dict:
                 "inputModes": ["text"],
                 "outputModes": ["text"],
             },
+            {
+                "id": "bounty.create",
+                "name": "Create Bounty",
+                "description": "Post a token bounty for an unanswered question. Locks amount from creator into escrow.",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
+            {
+                "id": "bounty.list",
+                "name": "List Bounties",
+                "description": "List open bounties (optional framework filter).",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
+            {
+                "id": "bounty.claim",
+                "name": "Claim Bounty",
+                "description": "Claim an open bounty to work on answering it.",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
+            {
+                "id": "bounty.answer",
+                "name": "Answer Bounty",
+                "description": "Submit an answer for a claimed bounty. Rewards solver (amount + 20% bonus) and sinks solution to memory.",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
+            {
+                "id": "bounty.match",
+                "name": "Match Bounty",
+                "description": "Find namespaces with relevant memory for a bounty (RRF push-matching).",
+                "inputModes": ["text"],
+                "outputModes": ["text"],
+            },
         ],
     }
 
@@ -175,8 +210,18 @@ def handle_send_message(message: Dict, agent_id: str) -> Dict:
             return _handle_session_read(agent_id, params)
         elif skill == "session.share":
             return _handle_session_share(agent_id, params)
+        elif skill == "bounty.create":
+            return _handle_bounty_create(agent_id, params)
+        elif skill == "bounty.list":
+            return _handle_bounty_list(agent_id, params)
+        elif skill == "bounty.claim":
+            return _handle_bounty_claim(agent_id, params)
+        elif skill == "bounty.answer":
+            return _handle_bounty_answer(agent_id, params)
+        elif skill == "bounty.match":
+            return _handle_bounty_match(agent_id, params)
         else:
-            return _error(f"Unknown skill: {skill}. Available: memory.write/search/read/share, session.search/read/share")
+            return _error(f"Unknown skill: {skill}. Available: memory.write/search/read/share, session.search/read/share, bounty.create/list/claim/answer/match")
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
@@ -279,6 +324,71 @@ def _handle_session_share(agent_id: str, params: Dict) -> Dict:
 
     ok = share_session(row["id"], owner_namespace=agent_id)
     return _ok({"shared": ok})
+
+
+# ── Bounty skill handlers (C-stage economy) ─────────────────────────────────
+
+def _handle_bounty_create(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import create_bounty
+    question = params.get("question", "")
+    amount = params.get("amount") or params.get("bounty_amount") or 0
+    if not question or not amount:
+        raise ValueError("'question' and 'amount' are required for bounty.create")
+    bounty = create_bounty(
+        question=question,
+        amount=int(amount),
+        creator_namespace=agent_id,
+        framework=params.get("framework"),
+        expires_in_hours=params.get("expires_in_hours", 24),
+    )
+    return _ok({
+        "bounty_id": str(bounty["id"]),
+        "amount": bounty["amount"],
+        "status": bounty["status"],
+        "expires_at": bounty["expires_at"].isoformat() if bounty.get("expires_at") else None,
+    })
+
+
+def _handle_bounty_list(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import list_bounties
+    bounties = list_bounties(
+        status=params.get("status", "open"),
+        framework=params.get("framework"),
+        limit=params.get("limit", 20),
+    )
+    return _ok({"bounties": bounties, "total": len(bounties)})
+
+
+def _handle_bounty_claim(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import claim_bounty
+    bid = params.get("bounty_id", "")
+    if not bid:
+        raise ValueError("'bounty_id' is required for bounty.claim")
+    claimed = claim_bounty(bid, agent_id)
+    if not claimed:
+        return _ok({"claimed": False, "error": "Bounty not found or not open"})
+    return _ok({"claimed": True, "bounty_id": str(claimed["id"])})
+
+
+def _handle_bounty_answer(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import answer_bounty
+    bid = params.get("bounty_id", "")
+    solution = params.get("solution", "")
+    if not bid or not solution:
+        raise ValueError("'bounty_id' and 'solution' are required for bounty.answer")
+    result = answer_bounty(bid, solution, agent_id)
+    if not result:
+        return _ok({"resolved": False, "error": "Bounty not found or not claimed by you"})
+    return _ok({"resolved": True, **result})
+
+
+def _handle_bounty_match(agent_id: str, params: Dict) -> Dict:
+    from hermes.bounty_service import match_bounty
+    bid = params.get("bounty_id", "")
+    if not bid:
+        raise ValueError("'bounty_id' is required for bounty.match")
+    matches = match_bounty(bid, limit=params.get("limit", 5))
+    return _ok({"bounty_id": bid, "matches": matches, "total": len(matches)})
 
 
 # ── Response Helpers ───────────────────────────────────────────────────────

@@ -777,6 +777,13 @@ def a2a_register_agent(body: dict):
         auth_credentials=hashed,
         agent_url=body.get("agent_url", ""),
     )
+    # C-stage: provision wallet with initial token grant
+    try:
+        from hermes.bounty_service import get_or_create_wallet
+        agent["wallet"] = get_or_create_wallet(body.get("namespace", agent_id))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"wallet provision failed: {e}")
     return agent
 
 
@@ -795,6 +802,68 @@ def a2a_delete_agent(agent_id: str):
 def a2a_agent_stats(agent_id: str):
     from hermes.memory_service import get_memory_stats
     return get_memory_stats(namespace=agent_id)
+
+
+# ── Bounty Economy API (C-stage) ────────────────────────────────────────
+
+@app.post("/api/bounty/create")
+def bounty_create(body: dict):
+    """Create a bounty: debits creator, locks amount in escrow."""
+    from hermes.bounty_service import create_bounty
+    try:
+        bounty = create_bounty(
+            question=body.get("question", ""),
+            amount=int(body.get("amount", 0)),
+            creator_namespace=body.get("creator_namespace", ""),
+            framework=body.get("framework"),
+            expires_in_hours=body.get("expires_in_hours", 24),
+        )
+        return {"bounty_id": str(bounty["id"]), "amount": bounty["amount"], "status": bounty["status"]}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/bounty/list")
+def bounty_list(status: str = "open", framework: Optional[str] = None, limit: int = Query(20, ge=1, le=100)):
+    from hermes.bounty_service import list_bounties
+    return {"bounties": list_bounties(status=status, framework=framework, limit=limit)}
+
+
+@app.post("/api/bounty/{bounty_id}/claim")
+def bounty_claim(bounty_id: str, body: dict):
+    from hermes.bounty_service import claim_bounty
+    claimed = claim_bounty(bounty_id, body.get("claimer_namespace", ""))
+    if not claimed:
+        raise HTTPException(400, "Bounty not found or not open")
+    return {"claimed": True, "bounty_id": str(claimed["id"])}
+
+
+@app.post("/api/bounty/{bounty_id}/answer")
+def bounty_answer(bounty_id: str, body: dict):
+    from hermes.bounty_service import answer_bounty
+    result = answer_bounty(bounty_id, body.get("solution", ""), body.get("solver_namespace", ""))
+    if not result:
+        raise HTTPException(400, "Bounty not claimed by you")
+    return result
+
+
+@app.get("/api/bounty/{bounty_id}/match")
+def bounty_match(bounty_id: str, limit: int = Query(5, ge=1, le=20)):
+    from hermes.bounty_service import match_bounty
+    return {"matches": match_bounty(bounty_id, limit=limit)}
+
+
+@app.get("/api/wallet/{namespace}")
+def wallet_balance(namespace: str):
+    from hermes.bounty_service import get_or_create_wallet, get_transactions
+    w = get_or_create_wallet(namespace)
+    return {
+        "namespace": w["namespace"],
+        "token_balance": w["token_balance"],
+        "tokens_earned": w["tokens_earned"],
+        "tokens_spent": w["tokens_spent"],
+        "recent_transactions": get_transactions(namespace, limit=10),
+    }
 
 
 # ── Source-Scoped Routes (with DB fallback) ────────────────────────────────
