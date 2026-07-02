@@ -344,6 +344,33 @@ def memory_reject(memory_id: str):
         raise HTTPException(503, f"Reject error: {str(e)}")
 
 
+@app.post("/api/memory/{memory_id}/refute")
+def memory_refute(memory_id: str, body: dict):
+    """Link a refutation (memory or session span) to a memory, then re-run the
+    threshold gate — demotes immediately if threshold is met."""
+    from hermes.counterexample_service import add_refutation, demote_by_threshold
+    namespace = (body or {}).get("namespace", "claude")
+    ref = add_refutation(
+        target_id=memory_id,
+        reason=(body or {}).get("reason", ""),
+        refuting_id=(body or {}).get("refuting_id"),
+        session_ref=(body or {}).get("session_ref"),
+        source=(body or {}).get("source", "agent"),
+        confidence=(body or {}).get("confidence"),
+        namespace=namespace,
+    )
+    gate = demote_by_threshold(memory_id, namespace=namespace)
+    return {"refuted": ref is not None, "refutation": ref, "gate": gate}
+
+
+@app.get("/api/memory/{memory_id}/refutations")
+def memory_refutations(memory_id: str, namespace: str = "claude"):
+    """List refutation links + current gate state for a memory."""
+    from hermes.counterexample_service import list_refutations, gate_status
+    return {"refutations": list_refutations(memory_id, namespace),
+            "gate": gate_status(memory_id, namespace)}
+
+
 @app.get("/api/memory/graph")
 def memory_graph(
     entity: Optional[str] = Query(None),

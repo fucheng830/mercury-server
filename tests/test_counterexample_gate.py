@@ -265,3 +265,39 @@ def test_reconcile_apply_runs_channel2_on_involved_targets():
 
     extractor._reconcile_and_write(fake_items, pid, "p-ch2e2e", _FakeLLM(), namespace="claude")
     assert get_memory(target["id"])["status"] == "superseded"  # channel 2 demoted
+
+
+def test_endpoint_refute_then_refutations():
+    from fastapi.testclient import TestClient
+    from server import app
+    from hermes.memory_service import get_or_create_project
+    pid = get_or_create_project("p-api1", "/p/api1", "claude")["id"]
+    t = _write("target", pid, seed=60)
+    e = _write("evidence", pid, seed=61)
+    client = TestClient(app)
+    r = client.post(f"/api/memory/{t['id']}/refute", json={
+        "refuting_id": e["id"], "reason": "contradicts", "source": "agent"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["refuted"] is True
+    assert body["gate"]["count"] == 1
+    # importance defaults to 3 → threshold 1 → demoted immediately
+    assert body["gate"]["demoted"] is True
+    g = client.get(f"/api/memory/{t['id']}/refutations")
+    assert g.status_code == 200
+    gbody = g.json()
+    assert len(gbody["refutations"]) == 1
+    assert gbody["gate"]["active"] is False  # already demoted
+
+
+def test_endpoint_refute_session_ref():
+    from fastapi.testclient import TestClient
+    from server import app
+    from hermes.memory_service import get_or_create_project
+    pid = get_or_create_project("p-api2", "/p/api2", "claude")["id"]
+    t = _write("target2", pid, seed=62)
+    client = TestClient(app)
+    r = client.post(f"/api/memory/{t['id']}/refute", json={
+        "session_ref": {"session_id": "s1", "span": [5, 9]},
+        "reason": "session shows the opposite", "source": "agent"})
+    assert r.status_code == 200 and r.json()["refuted"] is True
