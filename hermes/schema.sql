@@ -298,6 +298,86 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ════════════════════════════════════════════════════════════════════════
+-- session_messages: message-level FTS + vector (2026-07-05)
+-- See docs/superpowers/specs/2026-07-05-message-level-search-design.md
+-- Independent recall channel alongside memories. RRF hybrid with the same
+-- return shape as hybrid_search (both carry rrf_score), so a future
+-- federated UNION across memories + messages needs only a second RRF pass.
+-- ════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS session_messages (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id    UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    namespace     VARCHAR(100) NOT NULL,
+    seq           INTEGER NOT NULL,        -- index among extracted text turns
+    role          VARCHAR(20) NOT NULL,    -- user / assistant
+    content_text  TEXT NOT NULL,
+    embedding     vector(1024),
+    fts           tsvector GENERATED ALWAYS AS (to_tsvector('simple', content_text)) STORED,
+    created_ts    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(session_id, seq)                -- idempotent ingest
+);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_session_messages_ns      ON session_messages(namespace);
+CREATE INDEX IF NOT EXISTS idx_session_messages_fts     ON session_messages USING gin(fts);
+CREATE INDEX IF NOT EXISTS idx_session_messages_emb     ON session_messages USING hnsw (embedding vector_cosine_ops);
+
+-- drop legacy overloads of search_session_messages (none expected initially)
+DO $$ DECLARE r record; BEGIN
+  FOR r IN SELECT p.oid::regprocedure FROM pg_proc p
+           JOIN pg_namespace n ON p.pronamespace=n.oid
+           WHERE p.proname='search_session_messages' AND n.nspname='public' LOOP
+    EXECUTE 'DROP FUNCTION IF EXISTS ' || r.oid::regprocedure;
+  END LOOP;
+END $$;
+CREATE FUNCTION search_session_messages(
+    query_text        TEXT,
+    query_embedding   vector(1024),
+    target_namespaces TEXT[]  DEFAULT NULL,
+    match_limit       INT     DEFAULT 20,
+    match_offset      INT     DEFAULT 0,
+    rrf_k             INT     DEFAULT 60
+) RETURNS TABLE (
+    id UUID, session_id UUID, seq INTEGER, role VARCHAR,
+    content_text TEXT, namespace VARCHAR, created_ts TIMESTAMPTZ,
+    rrf_score REAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH vector_results AS (
+        SELECT m.id, row_number() OVER (ORDER BY m.embedding <=> query_embedding) AS rank
+        FROM session_messages m
+        WHERE m.embedding IS NOT NULL
+          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
+    ),
+    fts_results AS (
+        SELECT m.id, row_number() OVER (
+            ORDER BY ts_rank(m.fts, plainto_tsquery('simple', query_text)) DESC
+        ) AS rank
+        FROM session_messages m
+        WHERE m.fts @@ plainto_tsquery('simple', query_text)
+          AND (target_namespaces IS NULL OR m.namespace = ANY(target_namespaces))
+    ),
+    combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               CAST(
+                 (1.0 / (rrf_k + COALESCE(v.rank, 1000))) +
+                 (1.0 / (rrf_k + COALESCE(f.rank, 1000)))
+               AS REAL) AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.session_id, m.seq, m.role,
+           m.content_text, m.namespace, m.created_ts,
+           c.rrf_score
+    FROM combined c
+    JOIN session_messages m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT match_limit OFFSET match_offset;
+END;
+$$ LANGUAGE plpgsql;
+
 -- ── retire legacy layer ───────────────────────────────────────────────────
 DROP INDEX IF EXISTS idx_memories_layer;
 DROP INDEX IF EXISTS idx_memories_ns_layer;

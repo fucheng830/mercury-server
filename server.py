@@ -451,6 +451,31 @@ def memory_search(body: dict):
         raise HTTPException(503, f"Memory search error: {str(e)}")
 
 
+@app.post("/api/sessions/search")
+def sessions_search(body: dict):
+    """Message-level hybrid search over session_messages (RRF + context window).
+
+    See docs/superpowers/specs/2026-07-05-message-level-search-design.md.
+    """
+    try:
+        from hermes.messages_service import search_messages
+        query = body.get("query", "")
+        if not query:
+            raise HTTPException(400, "query is required")
+        results = search_messages(
+            query,
+            namespace=body.get("namespace", "claude"),
+            limit=body.get("limit", 20),
+            offset=body.get("offset", 0),
+            context_window=body.get("context_window", 3),
+        )
+        return {"results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Session search error: {str(e)}")
+
+
 @app.delete("/api/memory/delete")
 def memory_delete(target: str = Query(...), substring: str = Query(...)):
     try:
