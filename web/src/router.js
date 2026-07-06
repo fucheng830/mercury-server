@@ -10,6 +10,7 @@ import RecapView from './views/RecapView.vue'
 import MemoryView from './views/MemoryView.vue'
 import MemoriesView from './views/MemoriesView.vue'
 import GraphView from './views/GraphView.vue'
+import SessionSearchView from './views/SessionSearchView.vue'
 
 const routes = [
   { path: '/', component: Dashboard },
@@ -23,6 +24,7 @@ const routes = [
   { path: '/candidates', component: MemoriesView, props: { stage: 'candidate' } },
   { path: '/observations', component: MemoriesView, props: { stage: 'observation' } },
   { path: '/graph', component: GraphView },
+  { path: '/sessions/search', component: SessionSearchView },
   { path: '/sources/:source', component: Dashboard, props: true },
   { path: '/sources/:source/history', component: HistoryView, props: true },
   { path: '/sources/:source/projects', component: ProjectsView, props: true },

@@ -49,7 +49,8 @@ def main():
 
     rows = execute(
         "SELECT id, session_id, project_path, namespace FROM sessions "
-        "WHERE session_id IS NOT NULL AND session_id <> ''",
+        "WHERE session_id IS NOT NULL AND session_id <> '' "
+        "ORDER BY last_ts DESC NULLS LAST",
         fetch=True,
     ) or []
     if args.project:

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useTheme } from './composables/useTheme'
 import { DEFAULT_SOURCE, routePath, sourceFromRoute } from './utils/source'
@@ -19,7 +19,7 @@ const activeSource = computed(() => sourceFromRoute(route))
 // Memory stage counts for sidebar badges
 const counts = ref({ memory: 0, candidate: 0, observation: 0 })
 
-const WORKSPACE = ['/memory', '/candidates', '/observations', '/graph']
+const WORKSPACE = ['/memory', '/candidates', '/observations', '/graph', '/sessions/search']
 
 const icon = {
   memory: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.5V20h6v-2.5c2.9-1.2 5-4.1 5-7.5a8 8 0 0 0-8-8Z"/><path d="M9 14h6"/></svg>',
@@ -28,6 +28,7 @@ const icon = {
   graph: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="6" r="2"/><circle cx="20" cy="18" r="2"/><line x1="6" x2="10" y1="7" y2="11"/><line x1="14" x2="18" y1="13" y2="17"/></svg>',
   activity: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
   ops: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/></svg>',
 }
 
 const groups = computed(() => [
@@ -43,6 +44,7 @@ const groups = computed(() => [
     label: null,
     items: [
       { path: '/graph', label: '知识图谱', icon: icon.graph, workspace: true },
+      { path: '/sessions/search', label: '对话搜索', icon: icon.search, workspace: true },
       { path: '/history', label: '活动', icon: icon.activity, source: true },
       { path: '/', label: '运维', icon: icon.ops, source: true },
     ],
@@ -51,9 +53,15 @@ const groups = computed(() => [
 
 onMounted(async () => {
   initTheme()
+  syncSidebarForViewport()
+  window.addEventListener('resize', syncSidebarForViewport)
   await fetchSources()
   restoreStoredSource()
   fetchCounts()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', syncSidebarForViewport)
 })
 
 async function fetchSources() {
@@ -80,6 +88,10 @@ async function fetchCounts() {
 }
 
 function toggleSidebar() { sidebarOpen.value = !sidebarOpen.value }
+
+function syncSidebarForViewport() {
+  if (window.innerWidth < 760) sidebarOpen.value = false
+}
 
 function navPath(item) {
   return item.workspace ? item.path : routePath(activeSource.value, item.path)
